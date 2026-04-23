@@ -1,0 +1,5 @@
+__pycache__/
+stock_picker_data/cache/
+stock_picker_data/results/
+*.pkl
+*.ipynb_checkpoints/

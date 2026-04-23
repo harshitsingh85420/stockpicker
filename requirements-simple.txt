@@ -1,0 +1,17 @@
+# Super Simple Requirements - Guaranteed to Work
+# Use this if you're having any installation issues
+# Install with: pip install -r requirements-simple.txt
+
+# Absolute essentials only
+numpy
+pandas
+yfinance
+lightgbm
+scikit-learn
+requests
+beautifulsoup4
+tqdm
+joblib
+
+# That's it! System works with just these 9 packages.
+# Other features will use built-in Python fallbacks.

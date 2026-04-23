@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git lfs *)",
+      "Bash(grep -E \"\\\\.\\(csv|zip|mp4|exe|dll|pdf|pkl\\)$\")"
+    ]
+  }
+}

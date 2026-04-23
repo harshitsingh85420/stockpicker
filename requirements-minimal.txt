@@ -1,0 +1,26 @@
+# Minimal Requirements - Use this if regular requirements.txt has issues
+# Install with: pip install -r requirements-minimal.txt
+# This version DOES NOT include pandas_ta (system works fine without it)
+
+# Core (absolutely required)
+numpy>=1.24.0,<2.0
+pandas>=2.0.0
+yfinance>=0.2.40
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+tqdm>=4.66.0
+joblib>=1.3.0
+imbalanced-learn>=0.11.0
+python-dateutil>=2.8.2
+pytz>=2023.3
+
+# Performance (recommended but optional)
+numba>=0.57.0
+
+# Visualization (optional)
+plotly>=5.17.0
+
+# NOTE: pandas_ta is NOT included
+# The system has built-in implementations for all technical indicators
