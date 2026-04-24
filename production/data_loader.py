@@ -204,6 +204,35 @@ class DataLoader:
         ).sort_values(["SC_CODE", "DATE"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
+    def get_available_dates(self, bhav_df: pd.DataFrame = None) -> list:
+        """
+        Return a sorted list of available trading date strings ('YYYY-MM-DD').
+
+        If bhav_df is provided, dates are derived from it (fast path, preferred).
+        Otherwise the BSE cache directory is scanned for date-stamped files.
+        """
+        if bhav_df is not None and not bhav_df.empty:
+            dates = sorted(bhav_df["DATE"].unique())
+            return [str(d) for d in dates]
+
+        # Scan cache directory for date-stamped BhavCopy files
+        import datetime as _dt
+        date_strings: set = set()
+        for p in self.cache_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            stem = p.stem
+            for fmt in ("%Y%m%d", "%Y-%m-%d"):
+                for chunk in (stem, stem[-8:], stem[:8], stem[-10:], stem[:10]):
+                    try:
+                        d = _dt.datetime.strptime(chunk, fmt).date()
+                        date_strings.add(str(d))
+                        break
+                    except (ValueError, OverflowError):
+                        continue
+        return sorted(date_strings)
+
+    # ------------------------------------------------------------------
     def get_latest_prices(self, bhav_df: pd.DataFrame) -> pd.DataFrame:
         """
         Return one row per SC_CODE with the most recent available OHLCV data.
