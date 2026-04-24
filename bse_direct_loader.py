@@ -1,7 +1,11 @@
 """
 Direct BSE BhavCopy data loader - Proven working code
 This is the exact code that works from the user's previous project
-With added caching to avoid re-downloading data
+With per-day caching to avoid re-downloading already-fetched dates.
+
+Cache strategy: one pickle file per trading day  (bhav_YYYYMMDD.pkl)
+Loading a range = reading individual day files + fetching only missing days.
+This means re-running with a new end date only downloads the new day(s).
 """
 
 import io
@@ -17,7 +21,7 @@ import requests
 
 
 class BSEDataFetcher:
-    """Direct BSE BhavCopy data fetcher with caching"""
+    """Direct BSE BhavCopy data fetcher with per-day caching"""
 
     # BSE BhavCopy URLs
     UDIFF_URL = "https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_{ymd}_F_0000.CSV"
@@ -54,9 +58,9 @@ class BSEDataFetcher:
 
     @staticmethod
     def prev_bday(d: date) -> date:
-        """Return d if it is a weekday, else step back to the nearest previous weekday."""
-        d = d - timedelta(days=1)   # start from yesterday
-        while d.weekday() >= 5:     # Saturday=5, Sunday=6
+        """Return the most recent weekday strictly before d."""
+        d = d - timedelta(days=1)
+        while d.weekday() >= 5:
             d -= timedelta(days=1)
         return d
 
@@ -89,14 +93,38 @@ class BSEDataFetcher:
 
         missing = [c for c in self.REQUIRED if c not in out.columns]
         if missing:
-            return pd.DataFrame()  # Skip if columns missing
+            return pd.DataFrame()
 
         out = out.dropna(subset=["Close", "High", "Low", "Open"])
         out["SC_CODE"] = out["SC_CODE"].astype(str)
         return out[self.REQUIRED]
 
+    # ------------------------------------------------------------------
+    # Per-day cache helpers
+    # ------------------------------------------------------------------
+
+    def _day_cache_path(self, d: date) -> Path:
+        return self.cache_dir / f"bhav_{self.ymd(d)}.pkl"
+
+    def _load_day_cache(self, d: date) -> Optional[pd.DataFrame]:
+        p = self._day_cache_path(d)
+        if p.exists():
+            with open(p, "rb") as f:
+                return pickle.load(f)
+        return None
+
+    def _save_day_cache(self, d: date, df: pd.DataFrame):
+        p = self._day_cache_path(d)
+        with open(p, "wb") as f:
+            pickle.dump(df, f)
+
+    # ------------------------------------------------------------------
     def fetch_bhav_for(self, d: date) -> Optional[pd.DataFrame]:
-        """Fetch BhavCopy for a single date"""
+        """Fetch BhavCopy for a single date (checks per-day cache first)."""
+        cached = self._load_day_cache(d)
+        if cached is not None:
+            return cached
+
         # Try UDiFF CSV
         url = self.UDIFF_URL.format(ymd=self.ymd(d))
         r = self.safe_get(url)
@@ -104,7 +132,10 @@ class BSEDataFetcher:
             try:
                 df = pd.read_csv(io.BytesIO(r.content))
                 df["DATE"] = pd.to_datetime(d).date()
-                return self.normalize_bhav(df)
+                norm = self.normalize_bhav(df)
+                if not norm.empty:
+                    self._save_day_cache(d, norm)
+                    return norm
             except Exception:
                 pass
 
@@ -118,43 +149,53 @@ class BSEDataFetcher:
                     with zf.open(name) as f:
                         df = pd.read_csv(f)
                 df["DATE"] = pd.to_datetime(d).date()
-                return self.normalize_bhav(df)
+                norm = self.normalize_bhav(df)
+                if not norm.empty:
+                    self._save_day_cache(d, norm)
+                    return norm
             except Exception:
                 pass
 
         return None
 
     def fetch_bhav_range(self, start_date: date, end_date: date) -> pd.DataFrame:
-        """Fetch BhavCopy data for a date range with caching"""
-        # Check if cached
-        cache_key = f"bhav_{self.ymd(start_date)}_{self.ymd(end_date)}.pkl"
-        cache_file = self.cache_dir / cache_key
+        """
+        Fetch BhavCopy data for a date range.
 
-        if cache_file.exists():
-            print(f"[BSE] Loading from cache: {cache_key}")
-            with open(cache_file, 'rb') as f:
-                return pickle.load(f)
-
-        # Download fresh data
-        print(f"[BSE] Downloading data from {start_date} to {end_date}...")
+        Uses per-day cache: already-fetched days load instantly from disk,
+        only missing days are downloaded from BSE.  Re-running with a new
+        end date downloads just the new day(s) — not the full history.
+        """
         got = []
+        downloaded = []
         cur = start_date
         while cur <= end_date:
             if not self.is_weekend(cur):
-                df = self.fetch_bhav_for(cur)
-                if df is not None and len(df):
-                    print(f"  bhav {cur} -> {len(df)} stocks")
-                    got.append(df)
+                cached = self._load_day_cache(cur)
+                if cached is not None:
+                    got.append(cached)
+                else:
+                    df = self.fetch_bhav_for(cur)
+                    if df is not None and len(df):
+                        print(f"  [downloaded] {cur} -> {len(df)} stocks")
+                        downloaded.append(cur)
+                        got.append(df)
             cur += timedelta(days=1)
+
+        if downloaded:
+            print(f"[BSE] Downloaded {len(downloaded)} new day(s); "
+                  f"{(cur - start_date).days - len(downloaded) - (sum(1 for d in _weekdays(start_date, end_date) if self.is_weekend(d)))} day(s) loaded from cache.")
+        else:
+            print(f"[BSE] All data loaded from cache ({len(got)} trading days).")
 
         if not got:
             return pd.DataFrame()
 
-        combined = pd.concat(got, ignore_index=True)
+        return pd.concat(got, ignore_index=True)
 
-        # Cache it
-        print(f"[BSE] Caching data to: {cache_key}")
-        with open(cache_file, 'wb') as f:
-            pickle.dump(combined, f)
 
-        return combined
+def _weekdays(start: date, end: date):
+    cur = start
+    while cur <= end:
+        yield cur
+        cur += timedelta(days=1)
