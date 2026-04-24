@@ -98,7 +98,7 @@ class CorporateActionsFetcher:
         """
         Return corporate actions DataFrame for the given date range.
 
-        Falls back gracefully: NSE API → BSE CSV → local cache → empty.
+        Falls back gracefully: NSE API -> BSE CSV -> local cache -> empty.
 
         Args:
             start_date: 'YYYY-MM-DD'; defaults to 2 years ago.
@@ -292,7 +292,7 @@ class CorporateActionsFetcher:
             return None
 
     # ------------------------------------------------------------------
-    # Parse purpose string → (action_type, ratio, bonus_denom)
+    # Parse purpose string -> (action_type, ratio, bonus_denom)
     # ------------------------------------------------------------------
 
     def _parse_purpose(self, purpose: str):
@@ -304,10 +304,10 @@ class CorporateActionsFetcher:
             price-adjusting event.
 
         Examples:
-            "face value split from rs 10 to rs 5"      → (SPLIT, 2.0, None)
-            "bonus 1:1"                                 → (BONUS, 1.0, 1.0)
-            "bonus issue in the ratio of 2 equity shares for every 3" → (BONUS, 2.0, 3.0)
-            "interim dividend rs 3 per share"           → (DIVIDEND, 3.0, None)
+            "face value split from rs 10 to rs 5"      -> (SPLIT, 2.0, None)
+            "bonus 1:1"                                 -> (BONUS, 1.0, 1.0)
+            "bonus issue in the ratio of 2 equity shares for every 3" -> (BONUS, 2.0, 3.0)
+            "interim dividend rs 3 per share"           -> (DIVIDEND, 3.0, None)
         """
         import re
 
@@ -315,7 +315,7 @@ class CorporateActionsFetcher:
 
         # ── SPLIT ─────────────────────────────────────────────────────
         if "split" in p or "sub-division" in p:
-            # "from rs 10 to rs 5" → ratio 2
+            # "from rs 10 to rs 5" -> ratio 2
             m = re.search(r"from\s+(?:rs\.?\s*)?(\d+\.?\d*)\s+to\s+(?:rs\.?\s*)?(\d+\.?\d*)", p)
             if m:
                 old_fv, new_fv = float(m.group(1)), float(m.group(2))
@@ -381,7 +381,7 @@ class CorporateActionsFetcher:
     def _save_cache(self, df: pd.DataFrame):
         try:
             df.to_csv(self.cache_file, index=False)
-            logger.info("Corporate actions cached → %s (%d records).", self.cache_file, len(df))
+            logger.info("Corporate actions cached -> %s (%d records).", self.cache_file, len(df))
         except Exception as e:
             logger.warning("Cache save failed: %s", e)
 

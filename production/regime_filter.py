@@ -148,7 +148,7 @@ class IndexRegimeFilter:
         if YFINANCE_AVAILABLE:
             try:
                 logger.info(
-                    "Fetching Nifty data from yfinance (%s → %s) …",
+                    "Fetching Nifty data from yfinance (%s -> %s) …",
                     start_date.strftime("%Y-%m-%d"),
                     end_date.strftime("%Y-%m-%d"),
                 )
@@ -172,7 +172,7 @@ class IndexRegimeFilter:
                 )
                 df = df.dropna().sort_values("DATE").reset_index(drop=True)
                 logger.info(
-                    "Nifty data fetched: %d rows (%s → %s).",
+                    "Nifty data fetched: %d rows (%s -> %s).",
                     len(df),
                     df["DATE"].iloc[0].date(),
                     df["DATE"].iloc[-1].date(),
@@ -593,10 +593,10 @@ class HMMRegimeDetector:
         """
         q25, q50, q75 = np.percentile(returns, [25, 50, 75])
         states = np.zeros(len(returns), dtype=int)
-        states[returns >= q75] = 0   # high return → state 0 (bull-ish)
-        states[(returns >= q50) & (returns < q75)] = 3  # moderate → sideways
+        states[returns >= q75] = 0   # high return -> state 0 (bull-ish)
+        states[(returns >= q50) & (returns < q75)] = 3  # moderate -> sideways
         states[(returns >= q25) & (returns < q50)] = 3
-        states[returns < q25] = 1   # low return → bear-ish
+        states[returns < q25] = 1   # low return -> bear-ish
         # assign high-vol state (2) based on absolute return magnitude
         abs_r = np.abs(returns)
         high_vol_thresh = np.percentile(abs_r, 85)
@@ -672,10 +672,10 @@ class HMMRegimeDetector:
         Assign a human-readable label to a state based on its training statistics.
 
         Classification rules (applied in order):
-        1. mean_return > BULL_RETURN_THRESHOLD  → BULL_TRENDING
-        2. mean_return < BEAR_RETURN_THRESHOLD  → BEAR_TRENDING
-        3. std_return  > HIGH_VOL_THRESHOLD     → HIGH_VOLATILITY
-        4. Otherwise                            → SIDEWAYS
+        1. mean_return > BULL_RETURN_THRESHOLD  -> BULL_TRENDING
+        2. mean_return < BEAR_RETURN_THRESHOLD  -> BEAR_TRENDING
+        3. std_return  > HIGH_VOL_THRESHOLD     -> HIGH_VOLATILITY
+        4. Otherwise                            -> SIDEWAYS
 
         Parameters
         ----------
@@ -812,8 +812,8 @@ def get_combined_regime(nifty_data: Optional[pd.DataFrame] = None) -> Dict[str, 
     merged regime assessment.
 
     The combined label is determined by the following priority:
-    - If the EMA filter says BEAR → combined is BEAR_TRENDING regardless of HMM.
-    - If the EMA filter says BULL and HMM agrees (BULL_TRENDING) → BULL_TRENDING.
+    - If the EMA filter says BEAR -> combined is BEAR_TRENDING regardless of HMM.
+    - If the EMA filter says BULL and HMM agrees (BULL_TRENDING) -> BULL_TRENDING.
     - Otherwise the HMM label is used.
 
     Parameters

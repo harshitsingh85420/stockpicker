@@ -142,7 +142,7 @@ class TradeOrchestrator:
 
         _sep = "=" * 68
         logger.info(_sep)
-        logger.info("  TRADE ORCHESTRATOR  —  %s  —  capital ₹%s",
+        logger.info("  TRADE ORCHESTRATOR  —  %s  —  capital Rs.%s",
                     ref_date, f"{self.cfg.total_capital:,}")
         logger.info(_sep)
 
@@ -156,13 +156,13 @@ class TradeOrchestrator:
             output_csv=None,
         )
 
-        # ── PRE-CHECK: Kill switch ────────────────────────────────────
+        # -- PRE-CHECK: Kill switch ------------------------------------
         if self._kill_switch_active():
             logger.warning("Kill switch ACTIVE — no trades today.")
             self._audit("SYSTEM_STOP", reason="kill_switch")
             return result
 
-        # ── PRE-CHECK: Circuit breaker ────────────────────────────────
+        # -- PRE-CHECK: Circuit breaker --------------------------------
         cb_state, size_mult = self._check_circuit_breaker()
         result["circuit_state"] = cb_state
         if cb_state == "HALTED":
@@ -173,23 +173,23 @@ class TradeOrchestrator:
             logger.warning("Circuit breaker WARNING — positions halved.")
             result["action"] = "REDUCED_SIZE"
 
-        # ── L1: Data Integrity ────────────────────────────────────────
-        logger.info("── L1  Data Integrity ──────────────────────────────────")
+        # -- L1: Data Integrity ----------------------------------------
+        logger.info("-- L1  Data Integrity ----------------------------------")
         bhav_df = self._l1_data(bhav_df, ref_date)
         if bhav_df is None:
             logger.error("L1: No data — SKIP_DAY.")
             return result
 
-        # ── L2: Universe Filter ───────────────────────────────────────
-        logger.info("── L2  Universe Filter ─────────────────────────────────")
+        # -- L2: Universe Filter ---------------------------------------
+        logger.info("-- L2  Universe Filter ---------------------------------")
         bhav_df, tradable_codes = self._l2_universe(bhav_df, ref_date)
         if not tradable_codes:
             logger.error("L2: Zero tradable stocks — SKIP_DAY.")
             return result
         logger.info("L2: %d tradable stocks.", len(tradable_codes))
 
-        # ── L3: Market Regime ─────────────────────────────────────────
-        logger.info("── L3  Market Regime & Events ──────────────────────────")
+        # -- L3: Market Regime -----------------------------------------
+        logger.info("-- L3  Market Regime & Events --------------------------")
         regime, threshold = self._l3_regime(ref_date)
         result["regime"] = regime
         if not regime.get("is_tradeable", True):
@@ -198,8 +198,8 @@ class TradeOrchestrator:
             return result
         logger.info("L3: regime=%s  threshold=%.2f", regime.get("regime"), threshold)
 
-        # ── L4+L5: Signal Generation ──────────────────────────────────
-        logger.info("── L4+L5  Feature Engineering & Signal Generation ───────")
+        # -- L4+L5: Signal Generation ----------------------------------
+        logger.info("-- L4+L5  Feature Engineering & Signal Generation -------")
         picks_df, feature_df, explanations = self._l45_signal(
             bhav_df, tradable_codes, ref_date, threshold
         )
@@ -210,33 +210,33 @@ class TradeOrchestrator:
             return result
         logger.info("L5: %d raw picks.", len(picks_df))
 
-        # ── L3b: Event calendar blackout ──────────────────────────────
+        # -- L3b: Event calendar blackout ------------------------------
         picks_df = self._l3b_events(picks_df, ref_date)
         if picks_df.empty:
             logger.info("L3b: All picks in event blackout — SKIP_DAY.")
             result["action"] = "SKIP_DAY"
             return result
 
-        # ── L6: Portfolio Construction ────────────────────────────────
-        logger.info("── L6  Portfolio Construction ──────────────────────────")
+        # -- L6: Portfolio Construction --------------------------------
+        logger.info("-- L6  Portfolio Construction --------------------------")
         picks_df = self._l6_portfolio(picks_df, bhav_df)
         if picks_df.empty:
             result["action"] = "SKIP_DAY"
             return result
         logger.info("L6: %d picks after portfolio filters.", len(picks_df))
 
-        # ── L7: Execution & Sizing ────────────────────────────────────
-        logger.info("── L7  Execution & Sizing ──────────────────────────────")
+        # -- L7: Execution & Sizing ------------------------------------
+        logger.info("-- L7  Execution & Sizing ------------------------------")
         picks_df = self._l7_execution(picks_df, bhav_df, size_mult, regime)
 
-        # ── L8: Annotate & validate ───────────────────────────────────
+        # -- L8: Annotate & validate -----------------------------------
         picks_df = self._annotate(picks_df, regime, ref_date, explanations)
 
-        # ── L9: Compliance & audit ────────────────────────────────────
-        logger.info("── L9  Compliance & Audit ──────────────────────────────")
+        # -- L9: Compliance & audit ------------------------------------
+        logger.info("-- L9  Compliance & Audit ------------------------------")
         self._l9_compliance(picks_df, ref_date)
 
-        # ── Write CSV ─────────────────────────────────────────────────
+        # -- Write CSV -------------------------------------------------
         csv_path = self._write_csv(picks_df, ref_date)
         self._print_summary(picks_df, ref_date)
 
@@ -251,7 +251,7 @@ class TradeOrchestrator:
     # LAYER IMPLEMENTATIONS
     # ====================================================================
 
-    # ── L1 ───────────────────────────────────────────────────────────────
+    # -- L1 ---------------------------------------------------------------
     def _l1_data(self, bhav_df, ref_date) -> Optional[pd.DataFrame]:
         """Fetch, standardise, health-check, corporate-action-adjust, QC."""
 
@@ -337,7 +337,7 @@ class TradeOrchestrator:
                     len(bhav_df), bhav_df["SC_CODE"].nunique())
         return bhav_df
 
-    # ── L2 ───────────────────────────────────────────────────────────────
+    # -- L2 ---------------------------------------------------------------
     def _l2_universe(self, bhav_df, ref_date):
         """Apply liquidity / price / volume gate."""
         try:
@@ -356,7 +356,7 @@ class TradeOrchestrator:
             logger.warning("L2: Universe filter failed (%s) — using all stocks.", e)
             return bhav_df, bhav_df["SC_CODE"].unique().tolist()
 
-    # ── L3 ───────────────────────────────────────────────────────────────
+    # -- L3 ---------------------------------------------------------------
     def _l3_regime(self, ref_date):
         """Nifty EMA regime + HMM. Returns (regime_dict, threshold)."""
         try:
@@ -391,7 +391,7 @@ class TradeOrchestrator:
             logger.warning("L3: Regime filter failed (%s) — defaults.", e)
             return {"regime": "UNKNOWN", "is_tradeable": True}, self.cfg.base_threshold
 
-    # ── L4+L5 ────────────────────────────────────────────────────────────
+    # -- L4+L5 ------------------------------------------------------------
     def _l45_signal(self, bhav_df, tradable_codes, ref_date, threshold):
         """Feature engineering + LightGBM prediction + SHAP."""
         # Filter bhav to tradable universe to save compute
@@ -451,7 +451,7 @@ class TradeOrchestrator:
 
         return picks_df, feature_df, explanations
 
-    # ── L3b ──────────────────────────────────────────────────────────────
+    # -- L3b --------------------------------------------------------------
     def _l3b_events(self, picks_df, ref_date):
         """Remove stocks within ±N days of earnings / dividends / board meetings."""
         try:
@@ -473,7 +473,7 @@ class TradeOrchestrator:
             logger.debug("L3b: Event blackout skipped: %s", e)
             return picks_df
 
-    # ── L6 ───────────────────────────────────────────────────────────────
+    # -- L6 ---------------------------------------------------------------
     def _l6_portfolio(self, picks_df, bhav_df):
         """Sector cap, correlation filter, position / capital limits."""
         try:
@@ -500,7 +500,7 @@ class TradeOrchestrator:
             picks_df = picks_df.head(self.cfg.max_positions)
         return picks_df
 
-    # ── L7 ───────────────────────────────────────────────────────────────
+    # -- L7 ---------------------------------------------------------------
     def _l7_execution(self, picks_df, bhav_df, size_mult, regime):
         """ATR stop-loss + position sizing + friction model + ADV cap."""
         # Ensure Close column
@@ -606,7 +606,7 @@ class TradeOrchestrator:
 
         return picks_df
 
-    # ── L9 ───────────────────────────────────────────────────────────────
+    # -- L9 ---------------------------------------------------------------
     def _l9_compliance(self, picks_df, ref_date):
         """Log every signal + order to SEBI audit trail."""
         try:
@@ -644,7 +644,7 @@ class TradeOrchestrator:
 
             audit.log_event("SYSTEM_STOP",
                             details={"picks_count": len(picks_df), "date": ref_date})
-            logger.info("L9: Audit trail written → %s.", self.cfg.audit_dir)
+            logger.info("L9: Audit trail written -> %s.", self.cfg.audit_dir)
         except Exception as e:
             logger.debug("L9: Compliance logging skipped: %s", e)
 
@@ -730,7 +730,7 @@ class TradeOrchestrator:
         cols = [c for c in preferred_order if c in picks_df.columns]
         extra = [c for c in picks_df.columns if c not in cols]
         picks_df[cols + extra].to_csv(out, index=False)
-        logger.info("Picks CSV → %s", out)
+        logger.info("Picks CSV -> %s", out)
         return out
 
     def _print_summary(self, picks_df, ref_date):
@@ -746,8 +746,8 @@ class TradeOrchestrator:
         print(picks_df[disp].head(30).to_string(index=False))
         if "Position_Value" in picks_df.columns:
             total = picks_df["Position_Value"].sum()
-            print(f"\n  Total capital deployed: ₹{total:,.0f} "
-                  f"({total/self.cfg.total_capital:.1%} of ₹{self.cfg.total_capital:,})")
+            print(f"\n  Total capital deployed: Rs.{total:,.0f} "
+                  f"({total/self.cfg.total_capital:.1%} of Rs.{self.cfg.total_capital:,})")
         print(f"{'='*72}\n")
 
 
@@ -765,9 +765,9 @@ def main():
         description="Run the production TradeOrchestrator for one trading day."
     )
     parser.add_argument("--date",      default=None,      help="YYYY-MM-DD (default: today)")
-    parser.add_argument("--capital",   default=1_000_000, type=float, help="Total capital in ₹")
+    parser.add_argument("--capital",   default=1_000_000, type=float, help="Total capital in Rs.")
     parser.add_argument("--min-price", default=20.0,      type=float, help="Min stock price filter")
-    parser.add_argument("--min-value", default=2.0,       type=float, help="Min daily value (₹ crore)")
+    parser.add_argument("--min-value", default=2.0,       type=float, help="Min daily value (Rs. crore)")
     parser.add_argument("--threshold", default=None,      type=float, help="Probability threshold override")
     args = parser.parse_args()
 

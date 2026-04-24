@@ -232,13 +232,13 @@ def prepare_features_all(bhav: pd.DataFrame, cache_dir: str = "./stock_picker_da
 
     # Try to load from cache
     if cache_file.exists():
-        print(f"✅ Loading features from cache: {cache_key}")
+        print(f"* Loading features from cache: {cache_key}")
         print(f"   (Saves 10-15 minutes of computation!)")
         try:
             with open(cache_file, 'rb') as f:
                 return pickle.load(f)
         except (pickle.UnpicklingError, EOFError, ValueError) as e:
-            print(f"⚠️ Cache file corrupted ({type(e).__name__}), deleting and recomputing...")
+            print(f"!️ Cache file corrupted ({type(e).__name__}), deleting and recomputing...")
             try:
                 cache_file.unlink()  # Delete corrupted cache
                 print(f"   Deleted corrupted cache: {cache_key}")
@@ -246,7 +246,7 @@ def prepare_features_all(bhav: pd.DataFrame, cache_dir: str = "./stock_picker_da
                 print(f"   Warning: Could not delete cache file: {delete_error}")
             # Continue to recompute features below
 
-    print("🔧 Computing momentum/breakout features (not cached)...")
+    print(" Computing momentum/breakout features (not cached)...")
     print(f"   This will take 10-15 minutes but will be cached for future runs...")
     df = bhav.sort_values(["SC_CODE", "DATE"]).copy()
 
@@ -313,17 +313,17 @@ def prepare_features_all(bhav: pd.DataFrame, cache_dir: str = "./stock_picker_da
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    print(f"✅ Features computed: {len(df):,} rows | {df['SC_CODE'].nunique()} stocks")
+    print(f"* Features computed: {len(df):,} rows | {df['SC_CODE'].nunique()} stocks")
 
     # ========== SAVE TO CACHE ==========
     result = df.sort_values(["SC_CODE", "DATE"]).reset_index(drop=True)
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"💾 Features cached to: {cache_key}")
+        print(f" Features cached to: {cache_key}")
         print(f"   Next run will be 10-15 minutes faster!")
     except Exception as e:
-        print(f"⚠️ Cache save failed: {e}")
+        print(f"!️ Cache save failed: {e}")
 
     return result
 
@@ -340,7 +340,7 @@ def add_forward_returns(df: pd.DataFrame, periods: list = [5]) -> pd.DataFrame:
     Returns:
         DataFrame with forward return columns added
     """
-    print(f"📊 Computing forward returns for periods: {periods}")
+    print(f" Computing forward returns for periods: {periods}")
 
     def add_fwd(g: pd.DataFrame) -> pd.DataFrame:
         g = g.sort_values("DATE").copy()
@@ -355,7 +355,7 @@ def add_forward_returns(df: pd.DataFrame, periods: list = [5]) -> pd.DataFrame:
         return g
 
     result = df.groupby("SC_CODE", group_keys=False).apply(add_fwd)
-    print(f"✅ Forward returns added")
+    print(f"* Forward returns added")
 
     return result
 

@@ -6,7 +6,7 @@ and the LightGBM model (stock_picker_enhanced.py / saved pkl) to the
 production layer, outputting a ranked DataFrame of trade candidates.
 
 Flow
-────
+----
   1. Accepts standardised BhavCopy (from DataLoader)
   2. Calls prepare_features_all() or prepare_features_enhanced() for indicators
   3. Loads or trains a LightGBM model
@@ -36,7 +36,7 @@ if str(_ROOT) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-# ── Feature columns used by the base model ───────────────────────────────────
+# -- Feature columns used by the base model -----------------------------------
 BASE_FEATURE_COLS = [
     "EMA20", "EMA50", "EMA200", "EMA20_Slope5", "EMA200_Slope", "MA_Health", "OverEMA20",
     "ATR14", "ATRpct", "BBWidth", "BBWidthPctl",
@@ -114,30 +114,30 @@ class SignalGenerator:
         """
         effective_threshold = regime_threshold_override if regime_threshold_override else threshold
 
-        # ── 1. Feature engineering ─────────────────────────────────────
+        # -- 1. Feature engineering -------------------------------------
         logger.info("Computing features …")
         feature_df = self._compute_features(bhav_df)
         if feature_df is None or feature_df.empty:
             logger.error("Feature computation returned empty DataFrame.")
             return pd.DataFrame(), pd.DataFrame()
 
-        # ── 2. Load / train model ──────────────────────────────────────
+        # -- 2. Load / train model --------------------------------------
         model = self._ensure_model(feature_df)
         if model is None:
             logger.error("No model available — cannot generate signals.")
             return pd.DataFrame(), feature_df
 
-        # ── 3. Predict on latest date ──────────────────────────────────
+        # -- 3. Predict on latest date ----------------------------------
         raw_picks = self._predict_latest(feature_df, model)
         if raw_picks.empty:
             logger.warning("No predictions generated.")
             return pd.DataFrame(), feature_df
 
-        # ── 4. Calibrate ───────────────────────────────────────────────
+        # -- 4. Calibrate -----------------------------------------------
         if calibrate:
             raw_picks = self._apply_calibration(raw_picks)
 
-        # ── 5. Apply threshold ─────────────────────────────────────────
+        # -- 5. Apply threshold -----------------------------------------
         picks = raw_picks[raw_picks["Probability"] >= effective_threshold].copy()
         picks = picks.sort_values("Probability", ascending=False).reset_index(drop=True)
         picks["Rank"] = range(1, len(picks) + 1)
@@ -168,18 +168,30 @@ class SignalGenerator:
 
         logger.info("Starting model training …")
 
-        # ── Feature engineering ────────────────────────────────────────
+        # -- Feature engineering ----------------------------------------
         feature_df = self._compute_features(bhav_df)
         if feature_df is None or feature_df.empty:
             raise ValueError("Feature computation failed — cannot train.")
 
-        # ── Add labels ─────────────────────────────────────────────────
+        # -- Add labels -------------------------------------------------
         label_col = _LABEL_COL_TEMPLATE.format(period=self.forward_period)
         feature_df = self._add_labels(feature_df)
         df_train = feature_df.dropna(subset=[label_col]).copy()
 
-        # ── Select feature columns ─────────────────────────────────────
+        # -- Select feature columns -------------------------------------
         feat_cols = self._select_feature_cols(df_train)
+
+        # Drop features where >50% of training rows are NaN (e.g. EMA200 on short windows)
+        feat_cols = [
+            c for c in feat_cols
+            if df_train[c].isna().mean() <= 0.50
+        ]
+        if not feat_cols:
+            raise ValueError(
+                "All feature columns have >50% NaN — dataset too short for chosen indicators. "
+                "Use lookback_days >= 250."
+            )
+
         df_train  = df_train.dropna(subset=feat_cols)
         X = df_train[feat_cols].fillna(0)
         y = df_train[label_col].astype(int)
@@ -187,7 +199,7 @@ class SignalGenerator:
         logger.info("Training set: %d rows, %d features, %.1f%% positive.",
                     len(X), len(feat_cols), y.mean() * 100)
 
-        # ── Time-series CV ─────────────────────────────────────────────
+        # -- Time-series CV ---------------------------------------------
         tscv   = TimeSeriesSplit(n_splits=n_cv_splits)
         aucs   = []
 
@@ -215,7 +227,7 @@ class SignalGenerator:
         cv_auc = float(np.mean(aucs))
         logger.info("CV AUC = %.4f ± %.4f", cv_auc, float(np.std(aucs)))
 
-        # ── Final model on all data ────────────────────────────────────
+        # -- Final model on all data ------------------------------------
         dtrain_full = lgb.Dataset(X, label=y)
         final_model = lgb.train(
             self._lgb_params(),
@@ -445,7 +457,7 @@ class SignalGenerator:
             model.save_model(str(self.model_path))
             with open(self.feature_path, "w") as fh:
                 json.dump(feat_cols, fh)
-            logger.info("Model saved → %s", self.model_path)
+            logger.info("Model saved -> %s", self.model_path)
         except Exception as e:
             logger.error("Model save failed: %s", e)
 

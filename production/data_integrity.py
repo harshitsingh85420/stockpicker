@@ -556,7 +556,7 @@ class SurvivorshipBiasCorrector:
         result = bhav_df[mask].copy()
         removed = before - len(result)
         logger.info(
-            "filter_bhav_survivorship_free(%s): %d → %d rows (%d removed, "
+            "filter_bhav_survivorship_free(%s): %d -> %d rows (%d removed, "
             "likely delisted/suspended)",
             reference_date, before, len(result), removed,
         )

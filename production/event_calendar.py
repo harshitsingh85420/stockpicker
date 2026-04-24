@@ -157,7 +157,7 @@ class CorporateEvent:
 # 3.  EventCalendarBlackout
 # ===========================================================================
 
-# BSE corporate-action categories → EventType mapping
+# BSE corporate-action categories -> EventType mapping
 _BSE_CATEGORY_MAP: Dict[str, EventType] = {
     "Board Meeting": EventType.BOARD_MEETING,
     "AGM": EventType.AGM,
@@ -265,7 +265,7 @@ class EventCalendarBlackout:
                     all_events.append(evt)
 
         logger.info(
-            "fetch_bse_announcements: %d sc_codes → %d events in range [%s, %s]",
+            "fetch_bse_announcements: %d sc_codes -> %d events in range [%s, %s]",
             len(sc_codes), len(all_events),
             start_dt.date(), end_dt.date(),
         )
@@ -676,7 +676,7 @@ class EventCalendarBlackout:
             excluded_df["blackout_reason"] = "event_blackout"
 
         logger.info(
-            "filter_picks(%s): %d picks → %d kept, %d excluded.",
+            "filter_picks(%s): %d picks -> %d kept, %d excluded.",
             reference_date,
             len(picks_df),
             len(filtered_df),

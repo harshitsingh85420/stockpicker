@@ -53,7 +53,7 @@ class TransactionCostConfig:
     exchange_nse_options: float = 0.0000495   # NSE F&O options (on premium)
 
     # --- SEBI Turnover Fees ---
-    # ₹10 per crore = 0.000001 per rupee of turnover
+    # Rs.10 per crore = 0.000001 per rupee of turnover
     sebi_charges: float = 0.000001
 
     # --- Stamp Duty (collected by state govts via exchanges, buy side only) ---
@@ -65,12 +65,12 @@ class TransactionCostConfig:
     gst_rate: float = 0.18  # 18%
 
     # --- Brokerage (lower of flat or percentage) ---
-    brokerage_flat_per_trade: float = 20.0   # ₹20 per executed order
+    brokerage_flat_per_trade: float = 20.0   # Rs.20 per executed order
     brokerage_percentage: float = 0.0003     # 0.03% of trade value
 
     # --- IPFT (Investor Protection Fund Trust) ---
-    ipft_nse: float = 0.000001   # ₹10 per crore on NSE
-    ipft_bse: float = 0.000001   # ₹10 per crore on BSE
+    ipft_nse: float = 0.000001   # Rs.10 per crore on NSE
+    ipft_bse: float = 0.000001   # Rs.10 per crore on BSE
 
     # --- Metadata ---
     version: str = "2026-04-01"  # Date of last rate update
@@ -127,7 +127,7 @@ class FrictionModel:
     def calculate_brokerage(self, trade_value: float) -> float:
         """
         Return brokerage cost.
-        Uses the lower of flat ₹20 per order or 0.03% of trade value.
+        Uses the lower of flat Rs.20 per order or 0.03% of trade value.
         """
         flat = self.config.brokerage_flat_per_trade
         pct = trade_value * self.config.brokerage_percentage
@@ -214,7 +214,7 @@ class FrictionModel:
         return trade_value * cfg.stamp_duty_buy_equity
 
     def calculate_sebi_charges(self, trade_value: float) -> float:
-        """Return SEBI turnover fee (₹10 per crore = 0.000001)."""
+        """Return SEBI turnover fee (Rs.10 per crore = 0.000001)."""
         return trade_value * self.config.sebi_charges
 
     def calculate_gst(
@@ -287,9 +287,9 @@ class FrictionModel:
         Parameters
         ----------
         entry_value : float
-            Value of the buy/entry leg in ₹.
+            Value of the buy/entry leg in Rs..
         exit_value : float, optional
-            Value of the sell/exit leg in ₹. Defaults to entry_value.
+            Value of the sell/exit leg in Rs.. Defaults to entry_value.
         exchange : str
             'NSE' or 'BSE'.
 
@@ -344,7 +344,7 @@ class FrictionModel:
         returns_series : pd.Series
             Daily or periodic gross returns (as decimals, e.g., 0.01 = 1%).
         avg_position_value : float
-            Average position size in ₹ used to compute brokerage impact.
+            Average position size in Rs. used to compute brokerage impact.
         holding_period_days : int
             Average number of trading days a position is held.
 
@@ -410,9 +410,9 @@ class SlippageModel:
         Parameters
         ----------
         order_value : float
-            Value of the order in ₹.
+            Value of the order in Rs..
         adv_value : float
-            Average daily value traded (ADV) in ₹.
+            Average daily value traded (ADV) in Rs..
         is_buy : bool
             Direction of order (both directions incur a cost).
 
@@ -435,7 +435,7 @@ class SlippageModel:
         is_buy: bool = True,
     ) -> float:
         """
-        Calculate total impact cost in ₹.
+        Calculate total impact cost in Rs..
 
         Parameters
         ----------
@@ -444,13 +444,13 @@ class SlippageModel:
         avg_daily_volume : float
             Average daily traded volume in shares.
         price : float
-            Current market price per share in ₹.
+            Current market price per share in Rs..
         is_buy : bool
             Direction of order.
 
         Returns
         -------
-        float : impact cost in ₹
+        float : impact cost in Rs.
         """
         order_value = shares * price
         adv_value = avg_daily_volume * price
@@ -643,7 +643,7 @@ def estimate_net_return(
     gross_return : float
         Gross return as a decimal (e.g., 0.05 = 5%).
     position_value : float
-        Position size in ₹.
+        Position size in Rs..
     instrument_type : str
         One of the supported instrument types.
     exchange : str

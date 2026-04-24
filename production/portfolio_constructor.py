@@ -377,11 +377,11 @@ class PortfolioConstructor:
         Parameters
         ----------
         picks_df : pd.DataFrame
-            Picks, optionally with a 'position_size' column (₹).
+            Picks, optionally with a 'position_size' column (Rs.).
         current_deployed_capital : float
-            Capital already deployed in open positions (₹).
+            Capital already deployed in open positions (Rs.).
         total_capital : float
-            Total trading capital (₹).
+            Total trading capital (Rs.).
 
         Returns
         -------
@@ -447,9 +447,9 @@ class PortfolioConstructor:
         current_positions_df : pd.DataFrame, optional
             Currently open positions (sc_code, sc_name columns).
         current_deployed_capital : float
-            Already-deployed capital in ₹.
+            Already-deployed capital in Rs..
         total_capital : float
-            Total available trading capital in ₹.
+            Total available trading capital in Rs..
 
         Returns
         -------
@@ -514,7 +514,7 @@ class PortfolioConstructor:
         dict with keys:
             sector_distribution  - {sector: count}
             correlation_stats    - {mean, max, min} pairwise correlations
-            total_capital_deployed - ₹ (sum of position_size if available)
+            total_capital_deployed - Rs. (sum of position_size if available)
             num_positions        - int
         """
         if portfolio_df.empty:
@@ -794,7 +794,7 @@ if __name__ == "__main__":
     bhav_df = pd.DataFrame(bhav_records)
 
     # --- Run full portfolio construction ---
-    total_capital = 1_000_000  # ₹10 lakh
+    total_capital = 1_000_000  # Rs.10 lakh
     portfolio = constructor.construct_portfolio(
         picks_df=picks_df,
         bhav_df=bhav_df,

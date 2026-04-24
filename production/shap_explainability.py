@@ -239,7 +239,7 @@ class SHAPExplainer:
         with open(log_file, "w") as fh:
             json.dump(payload, fh, indent=2, default=str)
 
-        logger.info("SHAP explanations saved → %s", log_file)
+        logger.info("SHAP explanations saved -> %s", log_file)
         return log_file
 
     # ------------------------------------------------------------------
@@ -279,7 +279,7 @@ class SHAPExplainer:
 
         if save_path:
             plt.savefig(save_path, bbox_inches="tight", dpi=120)
-            logger.info("SHAP summary plot saved → %s", save_path)
+            logger.info("SHAP summary plot saved -> %s", save_path)
         else:
             plt.tight_layout()
 
@@ -289,7 +289,7 @@ class SHAPExplainer:
     def save(self, path: str):
         with open(path, "wb") as fh:
             pickle.dump({"explainer": self._explainer, "feature_names": self.feature_names}, fh)
-        logger.info("SHAPExplainer saved → %s", path)
+        logger.info("SHAPExplainer saved -> %s", path)
 
     def load(self, path: str):
         with open(path, "rb") as fh:
@@ -385,4 +385,4 @@ if __name__ == "__main__":
     for exp in explanations:
         print_explanation(exp)
 
-    print("\n✅ SHAPExplainer smoke test passed.")
+    print("\n* SHAPExplainer smoke test passed.")

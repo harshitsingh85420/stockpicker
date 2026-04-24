@@ -119,7 +119,7 @@ class ProbabilityCalibrator:
     -----------------
     - PLATT_SCALING       : Logistic regression on raw scores (fast, parametric)
     - ISOTONIC_REGRESSION : Non-parametric monotone fit (more flexible)
-    - BETA_CALIBRATION    : Log-odds → log(p) + log(1-p) regression
+    - BETA_CALIBRATION    : Log-odds -> log(p) + log(1-p) regression
                             (falls back to Platt when sklearn absent)
     - NONE                : Identity (pass-through)
 
@@ -683,7 +683,7 @@ class BucketValidator:
 
 class CalibrationPipeline:
     """
-    End-to-end pipeline: base model training → calibration layer fitting →
+    End-to-end pipeline: base model training -> calibration layer fitting ->
     calibrated inference.
 
     Parameters
@@ -882,7 +882,7 @@ def calibrate_predictions(
     out[cal_prob_col] = calibrator.calibrate(raw_probs)
     logger.info(
         "calibrate_predictions: %d rows calibrated (method=%s). "
-        "Mean raw=%.4f → mean cal=%.4f.",
+        "Mean raw=%.4f -> mean cal=%.4f.",
         len(out),
         calibrator.method.name,
         float(raw_probs.mean()),

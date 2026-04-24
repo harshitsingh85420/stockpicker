@@ -27,7 +27,7 @@ class BSEDataFetcher:
         """Initialize with cache directory"""
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        print(f"📁 BSE cache directory: {self.cache_dir}")
+        print(f"[BSE] Cache directory: {self.cache_dir}")
 
     # Column mapping
     CANON = {
@@ -51,6 +51,14 @@ class BSEDataFetcher:
     @staticmethod
     def is_weekend(d: date) -> bool:
         return d.weekday() >= 5
+
+    @staticmethod
+    def prev_bday(d: date) -> date:
+        """Return d if it is a weekday, else step back to the nearest previous weekday."""
+        d = d - timedelta(days=1)   # start from yesterday
+        while d.weekday() >= 5:     # Saturday=5, Sunday=6
+            d -= timedelta(days=1)
+        return d
 
     @staticmethod
     def safe_get(url: str, timeout: int = 25) -> Optional[requests.Response]:
@@ -123,19 +131,19 @@ class BSEDataFetcher:
         cache_file = self.cache_dir / cache_key
 
         if cache_file.exists():
-            print(f"✅ Loading from cache: {cache_key}")
+            print(f"[BSE] Loading from cache: {cache_key}")
             with open(cache_file, 'rb') as f:
                 return pickle.load(f)
 
         # Download fresh data
-        print(f"📥 Downloading BSE data from {start_date} to {end_date}...")
+        print(f"[BSE] Downloading data from {start_date} to {end_date}...")
         got = []
         cur = start_date
         while cur <= end_date:
             if not self.is_weekend(cur):
                 df = self.fetch_bhav_for(cur)
                 if df is not None and len(df):
-                    print(f"  bhav {cur} → {len(df)} stocks")
+                    print(f"  bhav {cur} -> {len(df)} stocks")
                     got.append(df)
             cur += timedelta(days=1)
 
@@ -145,7 +153,7 @@ class BSEDataFetcher:
         combined = pd.concat(got, ignore_index=True)
 
         # Cache it
-        print(f"💾 Caching data to: {cache_key}")
+        print(f"[BSE] Caching data to: {cache_key}")
         with open(cache_file, 'wb') as f:
             pickle.dump(combined, f)
 

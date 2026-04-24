@@ -74,12 +74,16 @@ def _apply_corporate_actions(bhav: pd.DataFrame) -> pd.DataFrame:
 def _filter_universe(bhav: pd.DataFrame) -> pd.DataFrame:
     from production.universe_filter import TradabilityGate
     gate = TradabilityGate(min_value_crore=2.0, min_price=20.0, min_avg_volume=10_000)
-    tradable_codes = gate.apply(bhav)
+    reference_date = bhav["DATE"].max()
+    result = gate.apply(bhav, reference_date)
+    # apply() returns a filtered DataFrame; extract tradable codes and re-filter full bhav
+    if isinstance(result, pd.DataFrame) and "SC_CODE" in result.columns:
+        tradable_codes = set(result["SC_CODE"].unique())
+    else:
+        tradable_codes = set(result)          # fallback if it returns a set/list
+    before = bhav["SC_CODE"].nunique()
     filtered = bhav[bhav["SC_CODE"].isin(tradable_codes)].copy()
-    logger.info(
-        "Universe filter: %d → %d stocks",
-        bhav["SC_CODE"].nunique(), filtered["SC_CODE"].nunique(),
-    )
+    logger.info("Universe filter: %d -> %d stocks", before, filtered["SC_CODE"].nunique())
     return filtered
 
 
@@ -201,8 +205,8 @@ def _fit_calibrator(model, feat_df: pd.DataFrame, feature_cols: list):
         y = feat_df[label_col].values
         raw_probs = model.predict(X)
 
-        calibrator = ProbabilityCalibrator(method=CalibrationMethod.ISOTONIC)
-        calibrator.fit(raw_probs, y)
+        calibrator = ProbabilityCalibrator(method=CalibrationMethod.ISOTONIC_REGRESSION)
+        calibrator.fit(y, raw_probs)   # fit(y_true, y_prob_raw)
 
         cal_path = MODEL_DIR / "calibrator.pkl"
         with open(cal_path, "wb") as f:

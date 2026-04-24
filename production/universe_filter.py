@@ -182,7 +182,7 @@ class TradabilityGate:
 
         result = df[df["SC_CODE"].isin(tradable_codes)].copy()
         logger.info(
-            "apply(%s): %d → %d tradable stocks (price=%d, vol=%d, value=%d)",
+            "apply(%s): %d -> %d tradable stocks (price=%d, vol=%d, value=%d)",
             reference_date,
             df["SC_CODE"].nunique(),
             len(tradable_codes),
@@ -234,7 +234,7 @@ class TradabilityGate:
         before = df["SC_CODE"].nunique()
         result = df[df["SC_CODE"].isin(qualifying)]
         logger.debug(
-            "filter_by_price(>= %.2f): %d → %d stocks",
+            "filter_by_price(>= %.2f): %d -> %d stocks",
             self.min_price, before, len(qualifying),
         )
         return result
@@ -281,7 +281,7 @@ class TradabilityGate:
         before = df["SC_CODE"].nunique()
         result = df[df["SC_CODE"].isin(qualifying)]
         logger.debug(
-            "filter_by_volume(>= %d): %d → %d stocks",
+            "filter_by_volume(>= %d): %d -> %d stocks",
             self.min_avg_volume, before, len(qualifying),
         )
         return result
@@ -325,7 +325,7 @@ class TradabilityGate:
             .mean()
             .fillna(0)
         )
-        # Convert rupees → crores
+        # Convert rupees -> crores
         avg_value_crore = avg_value / CRORE
         qualifying = avg_value_crore[
             avg_value_crore >= self.min_value_crore
@@ -334,7 +334,7 @@ class TradabilityGate:
         before = df["SC_CODE"].nunique()
         result = df[df["SC_CODE"].isin(qualifying)]
         logger.debug(
-            "filter_by_value_traded(>= %.2f Cr): %d → %d stocks",
+            "filter_by_value_traded(>= %.2f Cr): %d -> %d stocks",
             self.min_value_crore, before, len(qualifying),
         )
         return result

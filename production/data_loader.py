@@ -48,7 +48,7 @@ SCHEMA = {
     "ValueTraded": "float64",
 }
 
-# All possible aliases from BSE new/old formats → canonical name
+# All possible aliases from BSE new/old formats -> canonical name
 _ALIASES = {
     # New BSE BhavCopy (CSV format)
     "FinInstrmId": "SC_CODE", "TckrSymb": "SC_NAME",
@@ -124,7 +124,7 @@ class DataLoader:
         else:
             start_dt = pd.to_datetime(start).date()
 
-        logger.info("Fetching BhavCopy %s → %s …", start_dt, end_dt)
+        logger.info("Fetching BhavCopy %s -> %s …", start_dt, end_dt)
         raw = fetcher.fetch_bhav_range(start_dt, end_dt)
 
         if raw is None or raw.empty:
@@ -133,7 +133,7 @@ class DataLoader:
 
         std = self.standardise(raw)
         logger.info(
-            "DataLoader: %d rows, %d stocks, %s → %s",
+            "DataLoader: %d rows, %d stocks, %s -> %s",
             len(std), std["SC_CODE"].nunique(),
             std["DATE"].min(), std["DATE"].max(),
         )
@@ -166,7 +166,7 @@ class DataLoader:
         df["SC_CODE"] = df["SC_CODE"].astype(str).str.strip()
         df["SC_NAME"] = df["SC_NAME"].astype(str).str.strip()
 
-        # DATE → Python date (not datetime, not string)
+        # DATE -> Python date (not datetime, not string)
         if df["DATE"].dtype != "object" or not isinstance(df["DATE"].iloc[0], date):
             df["DATE"] = pd.to_datetime(df["DATE"]).dt.date
 

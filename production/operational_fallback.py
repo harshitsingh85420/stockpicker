@@ -273,9 +273,9 @@ class ModelCacheManager:
 class OperationalFallback:
     """
     High-level coordinator that decides what to do when something goes wrong:
-      - Data source failure → skip trading day with alert
-      - Model failure → load last-known-good model
-      - Both fail → emergency skip with human notification
+      - Data source failure -> skip trading day with alert
+      - Model failure -> load last-known-good model
+      - Both fail -> emergency skip with human notification
     """
 
     SKIP_TODAY_FLAG = Path("stock_picker_data/SKIP_TODAY")
@@ -461,4 +461,4 @@ if __name__ == "__main__":
     result = fb.pre_run_health_check(bhav, "2026-04-23")
     print(result)
 
-    print("\n✅ OperationalFallback smoke test passed.")
+    print("\n* OperationalFallback smoke test passed.")

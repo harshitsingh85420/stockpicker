@@ -3,18 +3,18 @@ ENHANCED 5-Session Stock Picker - 75%+ Win Rate Algorithm
 Integrates ALL cutting-edge techniques from research
 
 IMPROVEMENTS INTEGRATED:
-✅ Phase 1 (65% → 73-77% win rate):
+* Phase 1 (65% -> 73-77% win rate):
    • Fractional differentiation (+5-6%)
    • FII/DII flows (+4-6%)
    • RFE feature selection (+3-5%)
    • Volume-weighted indicators (+2-3%)
 
-✅ Phase 2 (77% → 80-84% win rate):
+* Phase 2 (77% -> 80-84% win rate):
    • Ensemble stacking (+5-7%)
    • Unconventional indicators (+4-6%)
    • Probability calibration (+10-20% risk-adjusted)
 
-✅ Advanced techniques:
+* Advanced techniques:
    • HMM regime detection (+3-5%, -15-30% drawdown)
    • Kelly Criterion position sizing (+20-40% returns)
    • Liquidity filtering (-30-50% slippage)
@@ -47,7 +47,7 @@ try:
 except ImportError:
     from momentum_features import prepare_features_all
     ENHANCED_FEATURES = False
-    print("⚠️ Using basic features - enhanced features not available")
+    print("!️ Using basic features - enhanced features not available")
 
 from momentum_features import add_forward_returns
 
@@ -58,7 +58,7 @@ try:
 except ImportError:
     import lightgbm as lgb
     ENSEMBLE_AVAILABLE = False
-    print("⚠️ Ensemble not available - using single LightGBM")
+    print("!️ Ensemble not available - using single LightGBM")
 
 # Import feature selection
 try:
@@ -66,7 +66,7 @@ try:
     FEATURE_SELECTION_AVAILABLE = True
 except ImportError:
     FEATURE_SELECTION_AVAILABLE = False
-    print("⚠️ Feature selection not available")
+    print("!️ Feature selection not available")
 
 # Import risk management
 try:
@@ -78,7 +78,7 @@ try:
     RISK_MGMT_AVAILABLE = True
 except ImportError:
     RISK_MGMT_AVAILABLE = False
-    print("⚠️ Risk management not available")
+    print("!️ Risk management not available")
 
 # Import market regime
 try:
@@ -86,7 +86,7 @@ try:
     REGIME_DETECTION_AVAILABLE = True
 except ImportError:
     REGIME_DETECTION_AVAILABLE = False
-    print("⚠️ Regime detection not available")
+    print("!️ Regime detection not available")
 
 
 class EnhancedStockPicker:
@@ -133,17 +133,17 @@ class EnhancedStockPicker:
         Fetch data with enhanced feature engineering
         """
         print("\n" + "=" * 80)
-        print("📥 STEP 1: FETCH BSE DATA & COMPUTE ENHANCED FEATURES")
+        print(" STEP 1: FETCH BSE DATA & COMPUTE ENHANCED FEATURES")
         print("=" * 80)
 
         end_date = self.fetcher.prev_bday(date.today())
         start_date = end_date - timedelta(days=self.LOOKBACK_DAYS)
 
-        print(f"Date range: {start_date} → {end_date}")
+        print(f"Date range: {start_date} -> {end_date}")
 
         # Fetch bhav data
         bhav = self.fetcher.fetch_bhav_range(start_date, end_date)
-        print(f"✅ Fetched {len(bhav):,} rows | {bhav['SC_CODE'].nunique()} unique stocks")
+        print(f"* Fetched {len(bhav):,} rows | {bhav['SC_CODE'].nunique()} unique stocks")
 
         # Get qualified stocks
         qualified_stocks = self.fetcher.get_stock_universe(bhav, self.MIN_DATA_POINTS)
@@ -151,24 +151,24 @@ class EnhancedStockPicker:
 
         # Limit for training if specified
         if n_stocks and n_stocks > 0 and n_stocks < len(qualified_stocks):
-            print(f"📊 Limiting training to top {n_stocks} most liquid stocks...")
+            print(f" Limiting training to top {n_stocks} most liquid stocks...")
             liquidity = bhav_qualified.groupby('SC_CODE')['ValueTraded'].mean().sort_values(ascending=False)
             top_stocks = liquidity.head(n_stocks).index.tolist()
             bhav_train = bhav_qualified[bhav_qualified['SC_CODE'].isin(top_stocks)].copy()
         else:
             bhav_train = bhav_qualified.copy()
-            print(f"📊 Training on ALL qualified stocks: {len(qualified_stocks)} stocks")
+            print(f" Training on ALL qualified stocks: {len(qualified_stocks)} stocks")
 
         # Compute features (enhanced or basic)
         if use_enhanced_features and ENHANCED_FEATURES:
-            print("\n🚀 Using ENHANCED feature engineering (90+ features)...")
+            print("\n Using ENHANCED feature engineering (90+ features)...")
             features = prepare_features_enhanced(
                 bhav_train,
                 use_advanced=True,
                 use_fii_dii=True
             )
         else:
-            print("\n📊 Using BASIC feature engineering (50+ features)...")
+            print("\n Using BASIC feature engineering (50+ features)...")
             features = prepare_features_all(bhav_train)
 
         # Add forward returns
@@ -182,7 +182,7 @@ class EnhancedStockPicker:
         Prepare training data with optional feature selection
         """
         print("\n" + "=" * 80)
-        print("🎯 STEP 2: PREPARE TRAINING DATA WITH FEATURE SELECTION")
+        print(" STEP 2: PREPARE TRAINING DATA WITH FEATURE SELECTION")
         print("=" * 80)
 
         # Get feature columns
@@ -212,13 +212,13 @@ class EnhancedStockPicker:
         X = df_train[available_features].copy()
         y = df_train[label_col].copy()
 
-        print(f"📊 Initial training samples: {len(df_train):,}")
+        print(f" Initial training samples: {len(df_train):,}")
         print(f"   Positive: {y.sum():,} ({y.mean() * 100:.1f}%)")
         print(f"   Features: {len(available_features)}")
 
         # Feature selection (RFE)
         if use_feature_selection and FEATURE_SELECTION_AVAILABLE and len(available_features) > 50:
-            print("\n🔍 Running feature selection (RFE)...")
+            print("\n Running feature selection (RFE)...")
             target_features = min(50, len(available_features))
 
             self.selected_features = select_best_features(
@@ -228,10 +228,10 @@ class EnhancedStockPicker:
             )
 
             X = X[self.selected_features]
-            print(f"\n✅ Features reduced: {len(available_features)} → {len(self.selected_features)}")
+            print(f"\n* Features reduced: {len(available_features)} -> {len(self.selected_features)}")
         else:
             self.selected_features = available_features
-            print(f"\n✅ Using all {len(available_features)} features (no selection)")
+            print(f"\n* Using all {len(available_features)} features (no selection)")
 
         self.feature_cols = X.columns.tolist()
 
@@ -243,18 +243,18 @@ class EnhancedStockPicker:
         Train model (ensemble or single)
         """
         print("\n" + "=" * 80)
-        print("🤖 STEP 3: TRAIN ML MODEL (ENSEMBLE)")
+        print(" STEP 3: TRAIN ML MODEL (ENSEMBLE)")
         print("=" * 80)
 
         if use_ensemble and ENSEMBLE_AVAILABLE:
-            print("🏗️ Training stacked ensemble (5 LightGBM + XGBoost meta-learner)...")
+            print("️ Training stacked ensemble (5 LightGBM + XGBoost meta-learner)...")
             print("   Expected improvement: +10-20% win rate over single model!")
 
             self.ensemble = StackedEnsemble(use_xgboost=True, use_catboost=False)
             self.ensemble.train(X, y, num_boost_round=300)
 
         else:
-            print("📊 Training single LightGBM model...")
+            print(" Training single LightGBM model...")
 
             import lightgbm as lgb
             from sklearn.model_selection import TimeSeriesSplit
@@ -293,7 +293,7 @@ class EnhancedStockPicker:
                 cv_scores.append(auc)
                 print(f"   Fold {fold}: AUC = {auc:.4f}")
 
-            print(f"\n✅ CV AUC: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}")
+            print(f"\n* CV AUC: {np.mean(cv_scores):.4f} ± {np.std(cv_scores):.4f}")
 
             # Train final model
             train_data = lgb.Dataset(X, label=y)
@@ -305,11 +305,11 @@ class EnhancedStockPicker:
         Train HMM regime detector on market returns
         """
         if not REGIME_DETECTION_AVAILABLE:
-            print("\n⚠️ Regime detection not available - skipping")
+            print("\n!️ Regime detection not available - skipping")
             return
 
         print("\n" + "=" * 80)
-        print("🔍 STEP 4: TRAIN MARKET REGIME DETECTOR (HMM)")
+        print(" STEP 4: TRAIN MARKET REGIME DETECTOR (HMM)")
         print("=" * 80)
 
         # Calculate market returns (using NIFTY 50 proxy or average returns)
@@ -324,14 +324,14 @@ class EnhancedStockPicker:
         Predict with regime adaptation
         """
         print("\n" + "=" * 80)
-        print("🔮 STEP 5: PREDICT ON LATEST DATA WITH REGIME ADAPTATION")
+        print(" STEP 5: PREDICT ON LATEST DATA WITH REGIME ADAPTATION")
         print("=" * 80)
 
         latest_date = features_df['DATE'].max()
         df_latest = features_df[features_df['DATE'] == latest_date].copy()
 
-        print(f"📅 Prediction date: {latest_date}")
-        print(f"📊 Stocks to predict: {len(df_latest)}")
+        print(f" Prediction date: {latest_date}")
+        print(f" Stocks to predict: {len(df_latest)}")
 
         # Detect current regime
         current_regime = None
@@ -339,9 +339,9 @@ class EnhancedStockPicker:
             recent_returns = features_df.groupby('DATE')['Close'].mean().pct_change().tail(20)
             current_regime_id = self.regime_detector.predict_regime(recent_returns)
             current_regime = self.regime_detector.get_regime_label(current_regime_id)
-            print(f"\n🎯 Current market regime: {current_regime}")
+            print(f"\n Current market regime: {current_regime}")
         elif detect_regime and not (self.regime_detector and self.regime_detector.is_fitted()):
-            print("\n⚠️ Regime detection requested but model not fitted - continuing without regime adaptation")
+            print("\n!️ Regime detection requested but model not fitted - continuing without regime adaptation")
 
         # Prepare features
         df_predict = df_latest.dropna(subset=self.feature_cols).copy()
@@ -385,12 +385,12 @@ class EnhancedStockPicker:
         Select picks with liquidity filtering and position sizing
         """
         print("\n" + "=" * 80)
-        print("🎯 STEP 6: SELECT PICKS + LIQUIDITY FILTER + POSITION SIZING")
+        print(" STEP 6: SELECT PICKS + LIQUIDITY FILTER + POSITION SIZING")
         print("=" * 80)
 
         # Liquidity filtering
         if RISK_MGMT_AVAILABLE and 'Liquidity_Score' in predictions.columns:
-            print("\n🔍 Applying liquidity filters...")
+            print("\n Applying liquidity filters...")
             predictions = filter_by_liquidity(
                 predictions,
                 min_volume_crore=0.5,  # Minimum ₹0.5 crore daily volume
@@ -407,12 +407,12 @@ class EnhancedStockPicker:
             threshold = self.MIN_THRESHOLD
             picks = predictions[predictions['Probability'] >= threshold].copy()
 
-        print(f"\n✅ Final threshold: {threshold:.2f}")
-        print(f"✅ Total qualifying stocks: {len(picks)}")
+        print(f"\n* Final threshold: {threshold:.2f}")
+        print(f"* Total qualifying stocks: {len(picks)}")
 
         # Position sizing (Kelly Criterion)
         if RISK_MGMT_AVAILABLE and len(picks) > 0:
-            print("\n💰 Calculating position sizes (Kelly Criterion)...")
+            print("\n Calculating position sizes (Kelly Criterion)...")
 
             # Apply dynamic sizing
             picks = apply_dynamic_sizing(picks, base_capital=base_capital)
@@ -432,13 +432,13 @@ class EnhancedStockPicker:
         csv_path = self.results_dir / f"picks_enhanced_{today_str}.csv"
         picks.to_csv(csv_path, index=False)
 
-        print(f"\n💾 All {len(picks)} picks saved to: {csv_path}")
+        print(f"\n All {len(picks)} picks saved to: {csv_path}")
 
         # Display summary
         print("\n" + "=" * 80)
-        print(f"🏆 FINAL RESULTS: {len(picks)} QUALIFYING STOCKS")
+        print(f" FINAL RESULTS: {len(picks)} QUALIFYING STOCKS")
         print("=" * 80)
-        print(f"\n📊 Top 20 picks:")
+        print(f"\n Top 20 picks:")
         display_cols = ['Rank', 'SC_NAME', 'Close', 'Probability', 'VolMult', 'RS_Composite']
         if 'Capital_Allocation' in picks.columns:
             display_cols.append('Capital_Allocation')
@@ -458,17 +458,17 @@ def run_enhanced_daily(n_stocks: Optional[int] = None,
     Main entry point: Run enhanced picker with all improvements
     """
     print("\n" + "=" * 80)
-    print("🚀 ENHANCED 5-SESSION STOCK PICKER - 75%+ WIN RATE")
+    print(" ENHANCED 5-SESSION STOCK PICKER - 75%+ WIN RATE")
     print("=" * 80)
     print("\nImprovements active:")
-    print("  ✅ Enhanced features (90+): Fractional diff, FII/DII, volume-weighted, etc.")
-    print("  ✅ Feature selection (RFE): Reduce noise, keep best 50 features")
+    print("  * Enhanced features (90+): Fractional diff, FII/DII, volume-weighted, etc.")
+    print("  * Feature selection (RFE): Reduce noise, keep best 50 features")
     if use_ensemble and ENSEMBLE_AVAILABLE:
-        print("  ✅ Ensemble stacking: 5 LightGBM + XGBoost meta-learner")
+        print("  * Ensemble stacking: 5 LightGBM + XGBoost meta-learner")
     if use_regime_detection and REGIME_DETECTION_AVAILABLE:
-        print("  ✅ Market regime detection: HMM adaptation to market conditions")
+        print("  * Market regime detection: HMM adaptation to market conditions")
     if RISK_MGMT_AVAILABLE:
-        print("  ✅ Risk management: Kelly Criterion sizing, liquidity filtering")
+        print("  * Risk management: Kelly Criterion sizing, liquidity filtering")
     print("\nExpected win rate: 73-77% (all stocks) to 83-87% (top liquid)")
     print("=" * 80)
 
@@ -496,7 +496,7 @@ def run_enhanced_daily(n_stocks: Optional[int] = None,
     # Save
     picker.save_picks(picks)
 
-    print("\n✅ ENHANCED PICKER COMPLETE!")
+    print("\n* ENHANCED PICKER COMPLETE!")
     print(f"   Expected win rate: 73-77%+ (Phase 1 improvements)")
     print(f"   With ensemble: 80-84%+ (Phase 2 improvements)")
 

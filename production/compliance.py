@@ -108,7 +108,7 @@ class AuditTrail:
     One file per trading day: ``<log_dir>/audit_YYYYMMDD.json``
 
     Each file contains a JSON array of AuditEvent dicts.  Appends are
-    atomic at the file level (read → append → write) to avoid corruption
+    atomic at the file level (read -> append -> write) to avoid corruption
     from concurrent processes.
 
     Parameters
