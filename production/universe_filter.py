@@ -650,6 +650,111 @@ def apply_tradability_gate(
 
 
 # ===========================================================================
+# P46 — Survivorship-Free Point-in-Time Universe
+# ===========================================================================
+
+class PointInTimeUniverse:
+    """
+    P46: Returns the set of BSE-listed stocks valid on any given historical date.
+
+    Uses BSE scrip master (listed_date + delisted_date) to filter to stocks
+    that were actively traded on `as_of_date`.  Prevents survivorship bias in
+    walk-forward backtests by excluding stocks not yet listed or already delisted.
+
+    Parameters
+    ----------
+    master_path : str | Path
+        Path to bse_scrip_master.csv downloaded via BSE package.
+    """
+
+    MASTER_PATH = Path("stock_picker_data/bse_scrip_master.csv")
+
+    def __init__(self, master_path: str = None):
+        self._path = Path(master_path) if master_path else self.MASTER_PATH
+        self._master: Optional[pd.DataFrame] = None
+
+    def _load_master(self) -> pd.DataFrame:
+        if self._master is not None:
+            return self._master
+        if not self._path.exists():
+            logger.warning("P46: scrip master not found at %s — attempting download.", self._path)
+            self._download_master()
+        if not self._path.exists():
+            raise FileNotFoundError(
+                f"P46: BSE scrip master missing. Run: "
+                f"from production.universe_filter import PointInTimeUniverse; "
+                f"PointInTimeUniverse().download_master()"
+            )
+        df = pd.read_csv(self._path, low_memory=False)
+        for col in ("listed_date", "delisted_date"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        self._master = df
+        return df
+
+    def _download_master(self) -> None:
+        """Download BSE scrip master via bse PyPI package."""
+        try:
+            from bse import BSE
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with BSE(download_folder=str(self._path.parent / "tmp_bse")) as b:
+                master = b.getScripMaster()
+            if master is not None:
+                df = pd.DataFrame(master) if not isinstance(master, pd.DataFrame) else master
+                df.to_csv(self._path, index=False)
+                logger.info("P46: scrip master downloaded -> %s (%d rows)", self._path, len(df))
+        except Exception as exc:
+            logger.warning("P46: BSE scrip master download failed: %s", exc)
+
+    def download_master(self) -> pd.DataFrame:
+        """Public method to force re-download of scrip master."""
+        self._download_master()
+        self._master = None
+        return self._load_master()
+
+    def build_universe(self, as_of_date: str) -> pd.DataFrame:
+        """
+        Return stocks listed and not yet delisted on as_of_date.
+
+        Parameters
+        ----------
+        as_of_date : str
+            Date in YYYY-MM-DD format.
+
+        Returns
+        -------
+        pd.DataFrame filtered to valid stocks on that date.
+        """
+        master = self._load_master()
+        as_of = pd.Timestamp(as_of_date)
+
+        listed_mask = master["listed_date"].isna() | (master["listed_date"] <= as_of)
+        if "delisted_date" in master.columns:
+            delisted_mask = master["delisted_date"].isna() | (master["delisted_date"] > as_of)
+        else:
+            delisted_mask = pd.Series(True, index=master.index)
+
+        valid = master[listed_mask & delisted_mask].copy()
+        logger.info("P46: universe as of %s: %d stocks", as_of_date, len(valid))
+        return valid
+
+    def validate(self) -> None:
+        """
+        P46 acceptance check: 2020 universe must have >= 2026 universe size.
+        """
+        u2020 = self.build_universe("2020-03-01")
+        u2026 = self.build_universe("2026-04-27")
+        print(f"P46 Universe check: 2020={len(u2020)}  2026={len(u2026)}")
+        if len(u2020) < len(u2026):
+            logger.warning(
+                "P46: 2020 universe (%d) < 2026 universe (%d) — delisting data may be incomplete.",
+                len(u2020), len(u2026),
+            )
+        else:
+            logger.info("P46: survivorship check PASSED — historical universe correctly larger.")
+
+
+# ===========================================================================
 # Smoke-test / demo
 # ===========================================================================
 if __name__ == "__main__":

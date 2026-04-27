@@ -532,7 +532,7 @@ def main():
     # ── Phase 2 -- Walk-Forward Backtest (P07) ─────────────────────────
     if not args.no_backtest:
         try:
-            from walk_forward_backtest import run_walk_forward, print_walk_forward_summary
+            from production.walk_forward_backtest import run_walk_forward, print_walk_forward_summary
             logger.info("Phase 2 > Walk-forward backtest (P07: proper OOS) ...")
             wf_result = run_walk_forward(
                 end_date=today_str,

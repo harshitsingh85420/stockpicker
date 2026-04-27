@@ -2,40 +2,30 @@
 
 **ML-powered stock prediction system for Indian markets (BSE). Predicts stocks likely to close positive after 5 trading sessions.**
 
-## 🚀 NEW: Enhanced Algorithm (75%+ Win Rate!)
+## Quick Start
 
-**We've implemented 40+ cutting-edge techniques to boost win rate from 65% to 75%+!**
-
-| Version | Win Rate | Features | Best For |
-|---------|----------|----------|----------|
-| **Original** | ~65% | 50+ indicators, Single LightGBM | Learning, basic usage |
-| **Enhanced** ⭐ | **73-87%** | 90+ indicators, Ensemble stacking, Kelly sizing, Regime detection | Serious trading, maximum accuracy |
-
-**Quick Start (Enhanced Version)**:
 ```bash
-# Install enhanced dependencies
-pip install fracdiff pandas_ta hmmlearn arch statsmodels xgboost
-
-# Run enhanced picker
-python stock_picker_enhanced.py
+python run_full_cycle.py
 ```
 
-**📖 [Read Complete Algorithm Improvements Guide →](./ALGORITHM_IMPROVEMENTS.md)**
+## Walk-Forward Backtest Results (as of April 2026)
 
-Key improvements:
-- ✅ **Fractional differentiation** (López de Prado) - +5-6% win rate
-- ✅ **FII/DII institutional flows** (India-specific) - +4-6% win rate
-- ✅ **Ensemble stacking** (5 LightGBM + XGBoost) - +5-7% win rate
-- ✅ **Feature selection (RFE)** - +3-5% win rate
-- ✅ **Kelly Criterion position sizing** - +20-40% returns
-- ✅ **Market regime detection (HMM)** - -15-30% drawdown
-- ✅ **Liquidity filtering** - -30-50% slippage
-- ✅ **Indian seasonality** (September/November effects)
+| Metric | Value |
+|--------|-------|
+| Gross win rate | 58.1% (3,551 picks, 4 OOS blocks) |
+| Net win rate after friction | 45.8% |
+| Average net 5-day return | +0.69% |
+| Median net return | -0.34% |
 
-**Expected Results**:
-- All 5600+ BSE stocks: **73-77% win rate**
-- F&O stocks (~300): **80-84% win rate**
-- Top 200 liquid: **83-87% win rate**
+> **Note:** System is currently in BEAR market SKIP_DAY mode. Net WR is expected to decrease by 2-5 pp once survivorship-free universe is applied (P46).
+
+## Architecture
+
+- 9-layer production pipeline in `production/`
+- LightGBM + XGBoost ensemble (60/40 weighted, high-conviction filter)
+- 3-layer EMA regime gate (swing/medium/long) + India VIX gate
+- ATR-based position sizing with half-Kelly
+- Walk-forward OOS validation (no look-ahead)
 
 ---
 

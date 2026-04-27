@@ -1,26 +1,37 @@
-# 📊 BSE STOCK PREDICTION: COMPREHENSIVE IMPLEMENTATION AUDIT
+# BSE STOCK PREDICTION: IMPLEMENTATION STATUS
 
-**Goal**: Achieve 65% → 75%+ Win Rate on BSE 5600+ Stocks
-**Date**: 2025-11-12
-**Branch**: `claude/audit-bse-implementation-gaps-011CV3tSboKywDvGFbNyJSZA`
+**Last updated**: April 2026
+**Actual walk-forward OOS results**: Gross WR 58.1% / Net WR 45.8% (4 blocks, 3,551 picks)
+
+> Items marked CODED-NOT-WIRED exist in code files but are not active in the production pipeline.
 
 ---
 
-## 🎯 EXECUTIVE SUMMARY
+## PRODUCTION PIPELINE STATUS (run_full_cycle.py → production/)
 
-| Category | Status | Impact |
-|----------|--------|--------|
-| **Phase 1: Quick Wins** | ✅ **100% COMPLETE** | +14-20% win rate |
-| **Phase 2: Medium Effort** | ✅ **100% COMPLETE** | +15-21% win rate |
-| **Risk Management** | ✅ **100% COMPLETE** | +20-40% returns |
-| **Market Regime** | ✅ **100% COMPLETE** | -15-30% drawdown |
-| **Validation** | ✅ **100% COMPLETE** | Prevents overfitting |
-| **Alternative Data** | ❌ **0% COMPLETE** | +10-15% win rate |
-| **Advanced ML** | ⚠️ **33% COMPLETE** | +10-15% win rate |
-| **Production** | ⚠️ **PARTIAL** | Reliability |
-
-**Total Implemented Impact**: +49-81% win rate improvement
-**Total Missing Impact**: +20-30% win rate (alternative data + advanced ML)
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Walk-forward OOS backtest | ACTIVE | 4 blocks, P07 |
+| LightGBM model | ACTIVE | 33 features, AUC 0.5926 |
+| XGBoost ensemble | ACTIVE | P40: 60/40 weighted + conviction filter |
+| Fractional diff (FracDiff_Close) | ACTIVE | P14/P41: in feature_cols.json, d-cache |
+| ATR position sizing | ACTIVE | P19 |
+| 3-layer EMA regime (EMA10/20/50/200) | ACTIVE | P34 |
+| India VIX gate | ACTIVE | P11/P38 |
+| 2-state HMM regime | ACTIVE | P32: diag-cov, convergence check |
+| Drawdown circuit breaker | ACTIVE | P22 |
+| Corporate actions (BSE package) | ACTIVE | P28 |
+| SHAP explain_batch() | ACTIVE | P35: shap_top1-3 in CSV |
+| Event calendar blackout | ACTIVE | P21 |
+| Meta-labeling filter | ACTIVE | P13 |
+| OOS calibration ECE per block | ACTIVE | P30/P43 |
+| Exit type logging | ACTIVE | P36: STOP_HIT/TIME_STOP/etc |
+| FII/DII institutional flows | NOT WIRED | fetcher in advanced_features.py; NSE API unreliable |
+| Delivery percentage feature | NOT WIRED | NSE bhavcopy field pending verification |
+| Ensemble stacking (>2 models) | CODED-NOT-WIRED | Only LGB+XGB live; advanced_features.py has more |
+| Broker API (Zerodha Kite) | CODED | production/broker_adapter.py, paper_mode=True only |
+| Telegram alerts | CODED | production/alerting.py |
+| Unit tests | PARTIAL | tests/ directory — coverage TBD |
 
 ---
 

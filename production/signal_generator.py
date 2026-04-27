@@ -376,24 +376,51 @@ class SignalGenerator:
                 logger.error("Model predict failed: %s", e)
                 return pd.DataFrame()
 
-        # P12: XGBoost ensemble — average with LightGBM if available
+        # P40: LightGBM + XGBoost weighted ensemble with high-conviction filter
+        lgb_probs = probs.copy()
+        xgb_probs = np.zeros_like(lgb_probs)
+        both_agree = np.ones(len(lgb_probs), dtype=bool)
+
         xgb_model = self._load_xgb_model()
+        ens_cfg = self._load_ensemble_config()
+        lgb_w = ens_cfg.get("lgb_weight", 0.60)
+        xgb_w = ens_cfg.get("xgb_weight", 0.40)
+        hc_min = ens_cfg.get("high_conviction_min", 0.55)
+
         if xgb_model is not None:
             try:
                 import xgboost as xgb
                 dmat = xgb.DMatrix(X.values)
                 xgb_probs = xgb_model.predict(dmat)
-                probs = 0.5 * probs + 0.5 * xgb_probs
-                logger.info("P12: LightGBM + XGBoost ensemble applied.")
+                ensemble_probs = lgb_w * lgb_probs + xgb_w * xgb_probs
+                both_agree = (lgb_probs >= hc_min) & (xgb_probs >= hc_min)
+                # zero out stocks where models disagree
+                ensemble_probs = np.where(both_agree, ensemble_probs, 0.0)
+                n_before = int((lgb_probs >= hc_min).sum())
+                n_after  = int(both_agree.sum())
+                pct_reduced = 100 * (1 - n_after / max(n_before, 1))
+                logger.info(
+                    "P40 Ensemble active: LGB=%.2f XGB=%.2f | "
+                    "Both-agree filter reduced picks by %.1f%%",
+                    lgb_w, xgb_w, pct_reduced,
+                )
+                probs = ensemble_probs
             except Exception as exc:
-                logger.debug("P12: XGBoost ensemble skipped: %s", exc)
+                logger.debug("P40: XGBoost ensemble skipped: %s", exc)
 
         today_df = today_df.copy()
-        today_df["Probability_Raw"] = probs
+        today_df["Probability_Raw"] = lgb_probs
+        today_df["lgb_prob"]        = lgb_probs
+        today_df["xgb_prob"]        = xgb_probs
+        today_df["ensemble_prob"]   = probs
+        today_df["both_models_agree"] = both_agree
         today_df["Probability"]     = probs   # overwritten by calibration
 
         # Build picks dataframe with all useful signal columns
-        keep_cols = ["SC_CODE", "SC_NAME", "Close", "Probability_Raw", "Probability"]
+        keep_cols = [
+            "SC_CODE", "SC_NAME", "Close", "Probability_Raw", "Probability",
+            "lgb_prob", "xgb_prob", "ensemble_prob", "both_models_agree",
+        ]
         signal_cols = [
             "ATR14", "ATRpct", "VolMult", "RS_Composite",
             "ADX14", "RSI14", "DistTo52W", "Break63_Today",
@@ -507,6 +534,16 @@ class SignalGenerator:
             except Exception as e:
                 logger.debug("Calibrator load failed: %s", e)
         return self._calibrator
+
+    def _load_ensemble_config(self) -> dict:
+        """P40: Load ensemble weights from ensemble_config.json."""
+        cfg_path = self.models_dir / "ensemble_config.json"
+        if cfg_path.exists():
+            try:
+                return json.load(open(cfg_path))
+            except Exception:
+                pass
+        return {"lgb_weight": 0.60, "xgb_weight": 0.40, "high_conviction_min": 0.55}
 
     def _load_xgb_model(self):
         """P12: Load XGBoost ensemble member from disk (returns None if absent)."""

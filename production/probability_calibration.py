@@ -971,12 +971,41 @@ def calibration_curve_report(
             except Exception as exc:
                 logger.debug("P16: Chart save failed: %s", exc)
 
+    # P43: label clearly that this ECE is computed on TRAINING DATA (not OOS)
     logger.info(
-        "P16 calibration_curve_report: raw_ece=%.4f  raw_brier=%.4f%s",
+        "P16 calibration TRAINING-SET ECE (not OOS): raw=%.4f  raw_brier=%.4f%s  [not reliable]",
         raw_ece, raw_brier,
-        f"  cal_ece={result.get('cal_ece', 'N/A'):.4f}" if "cal_ece" in result else "",
+        f"  cal=%.4f" % result.get('cal_ece', 0) if "cal_ece" in result else "",
     )
     return result
+
+
+def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
+    """
+    P43: Expected Calibration Error — call on OOS hold-out blocks only.
+
+    Parameters
+    ----------
+    y_true : binary labels (0/1)
+    y_prob : predicted probabilities
+    n_bins : number of probability bins (default 10)
+
+    Returns
+    -------
+    float ECE in [0, 1]
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_prob = np.asarray(y_prob, dtype=float)
+    bins = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        mask = (y_prob >= bins[i]) & (y_prob < bins[i + 1])
+        if mask.sum() == 0:
+            continue
+        bin_acc  = float(y_true[mask].mean())
+        bin_conf = float(y_prob[mask].mean())
+        ece += float(mask.mean()) * abs(bin_acc - bin_conf)
+    return round(ece, 4)
 
 
 # ===========================================================================
