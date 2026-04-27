@@ -87,19 +87,42 @@ def _filter_universe(bhav: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def _build_features(bhav: pd.DataFrame) -> pd.DataFrame:
-    from momentum_features import prepare_features_all, add_forward_returns
+def _build_features(bhav: pd.DataFrame, use_triple_barrier: bool = False) -> pd.DataFrame:
+    from momentum_features import prepare_features_all, add_forward_returns, add_fracdiff_features
 
-    logger.info("Building features …")
+    logger.info("Building features ...")
     feat_df = prepare_features_all(bhav)
+    feat_df = add_fracdiff_features(feat_df, d=0.4)   # P14: fractional differentiation
     feat_df = add_forward_returns(feat_df, periods=[5])
-    label_col = "Label_fwd5_positive"
+
+    # P10 -- optionally use triple-barrier labels
+    if use_triple_barrier:
+        try:
+            from momentum_features import add_triple_barrier_labels
+            feat_df = add_triple_barrier_labels(feat_df)
+            label_col = "Label_tb_positive"
+            if label_col not in feat_df.columns:
+                logger.warning("Triple-barrier label missing -- falling back to binary label.")
+                label_col = "Label_fwd5_positive"
+            else:
+                logger.info("P10: Using triple-barrier labels (Label_tb_positive).")
+        except Exception as e:
+            logger.warning("Triple-barrier labels failed (%s) -- using binary label.", e)
+            label_col = "Label_fwd5_positive"
+    else:
+        label_col = "Label_fwd5_positive"
+
     if label_col not in feat_df.columns:
-        raise RuntimeError(f"add_forward_returns did not produce '{label_col}'")
+        raise RuntimeError(f"Label column '{label_col}' not found after feature build.")
+
+    feat_df.attrs["label_col"] = label_col
 
     before = len(feat_df)
     feat_df = feat_df.dropna(subset=[label_col])
-    logger.info("Features: %d rows → %d after dropping unlabelled tail", before, len(feat_df))
+    logger.info(
+        "Features: %d rows -> %d after dropping unlabelled tail  (label=%s)",
+        before, len(feat_df), label_col,
+    )
     return feat_df
 
 
@@ -108,7 +131,25 @@ def _train_lgbm(feat_df: pd.DataFrame, feature_cols: list, n_cv_splits: int, n_b
     from sklearn.model_selection import TimeSeriesSplit
     from sklearn.metrics import roc_auc_score
 
-    label_col = "Label_fwd5_positive"
+    # P10: use triple-barrier label if _build_features set it
+    label_col = feat_df.attrs.get("label_col", "Label_fwd5_positive")
+
+    # ── P05 safeguards: assert no target leakage into features ──────────
+    FORBIDDEN_FEATURES = {
+        "Label_fwd5_positive", "Label_fwd5_return",
+        "forward_return_5d", "_fwd_close",
+    }
+    leaked = [c for c in feature_cols if c in FORBIDDEN_FEATURES]
+    assert not leaked, f"P05: Target column(s) leaked into feature set! {leaked}"
+
+    FORWARD_SHIFT_PATTERN = [c for c in feature_cols if "fwd" in c.lower() or "forward" in c.lower()]
+    if FORWARD_SHIFT_PATTERN:
+        logger.warning(
+            "P05: Suspicious forward-looking column names in features: %s",
+            FORWARD_SHIFT_PATTERN,
+        )
+    # ─────────────────────────────────────────────────────────────────────
+
     X = feat_df[feature_cols].fillna(0).values
     y = feat_df[label_col].values
 
@@ -216,6 +257,89 @@ def _fit_calibrator(model, feat_df: pd.DataFrame, feature_cols: list):
         logger.warning("Calibrator fitting skipped: %s", exc)
 
 
+def _train_xgb(feat_df: pd.DataFrame, feature_cols: list, n_cv_splits: int, n_boost_rounds: int):
+    """
+    P12 -- Train XGBoost model on same features/labels used by LightGBM.
+    Returns (model, metrics) or (None, {}) if xgboost is not installed.
+    """
+    try:
+        import xgboost as xgb
+    except ImportError:
+        logger.warning("P12: xgboost not installed — skipping XGBoost ensemble component.")
+        return None, {}
+
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.metrics import roc_auc_score
+    import pickle
+
+    label_col = feat_df.attrs.get("label_col", "Label_fwd5_positive")
+    X = feat_df[feature_cols].fillna(0).values
+    y = feat_df[label_col].values
+
+    params = {
+        "objective":        "binary:logistic",
+        "eval_metric":      "auc",
+        "learning_rate":    0.05,
+        "max_depth":        6,
+        "min_child_weight": 50,
+        "subsample":        0.8,
+        "colsample_bytree": 0.8,
+        "reg_alpha":        0.1,
+        "reg_lambda":       0.1,
+        "n_jobs":           -1,
+        "verbosity":        0,
+        "seed":             42,
+    }
+
+    tscv = TimeSeriesSplit(n_splits=n_cv_splits)
+    cv_aucs = []
+    best_rounds = []
+
+    logger.info("P12 XGBoost TimeSeriesSplit CV (%d folds) ...", n_cv_splits)
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), 1):
+        X_tr, X_val = X[train_idx], X[val_idx]
+        y_tr, y_val = y[train_idx], y[val_idx]
+
+        dtrain = xgb.DMatrix(X_tr, label=y_tr)
+        dval   = xgb.DMatrix(X_val, label=y_val)
+
+        m = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=n_boost_rounds,
+            evals=[(dval, "val")],
+            early_stopping_rounds=50,
+            verbose_eval=False,
+        )
+        auc = roc_auc_score(y_val, m.predict(dval))
+        cv_aucs.append(auc)
+        best_rounds.append(m.best_iteration + 1)
+        logger.info("  XGB Fold %d: AUC=%.4f  trees=%d", fold, auc, best_rounds[-1])
+
+    logger.info("P12 XGBoost CV AUC: %.4f +/- %.4f", np.mean(cv_aucs), np.std(cv_aucs))
+
+    final_rounds = max(50, int(np.median(best_rounds)))
+    dtrain_full  = xgb.DMatrix(X, label=y)
+    final_model  = xgb.train(
+        params, dtrain_full,
+        num_boost_round=final_rounds,
+        verbose_eval=False,
+    )
+
+    xgb_path = MODEL_DIR / "xgb_model.pkl"
+    with open(xgb_path, "wb") as fh:
+        pickle.dump(final_model, fh)
+    logger.info("P12 XGBoost model saved -> %s", xgb_path)
+
+    metrics = {
+        "xgb_cv_aucs":  [round(a, 6) for a in cv_aucs],
+        "xgb_mean_auc": float(np.mean(cv_aucs)),
+        "xgb_std_auc":  float(np.std(cv_aucs)),
+        "xgb_final_boost_rounds": final_rounds,
+    }
+    return final_model, metrics
+
+
 # ---------------------------------------------------------------------------
 # Public callable API
 # ---------------------------------------------------------------------------
@@ -228,6 +352,7 @@ def run_training(
     boost_rounds: int = 500,
     calibrate: bool = True,
     apply_ca: bool = True,
+    use_triple_barrier: bool = False,
 ) -> dict:
     """
     Train the LightGBM swing-trade model and save to disk.
@@ -235,17 +360,19 @@ def run_training(
     Can be called from other scripts (e.g. run_full_cycle.py).
 
     Args:
-        lookback_days: Calendar days of history to use (if start not given).
-        start:         Explicit start date 'YYYY-MM-DD'.
-        end:           Explicit end date 'YYYY-MM-DD' (default: today).
-        cv_splits:     TimeSeriesSplit folds.
-        boost_rounds:  Max LightGBM boosting rounds per fold.
-        calibrate:     Fit and save ProbabilityCalibrator after training.
-        apply_ca:      Apply corporate action price adjustments.
+        lookback_days:       Calendar days of history to use (if start not given).
+        start:               Explicit start date 'YYYY-MM-DD'.
+        end:                 Explicit end date 'YYYY-MM-DD' (default: today).
+        cv_splits:           TimeSeriesSplit folds.
+        boost_rounds:        Max LightGBM boosting rounds per fold.
+        calibrate:           Fit and save ProbabilityCalibrator after training.
+        apply_ca:            Apply corporate action price adjustments.
+        use_triple_barrier:  P10: Use triple-barrier labels instead of binary
+                             close-to-close labels (default False).
 
     Returns:
         dict with keys: mean_auc, std_auc, feature_count, n_training_samples,
-                        model_path, trained_on.
+                        model_path, trained_on, label_col.
     """
     logger.info("=" * 60)
     logger.info("Model retraining — %s", date.today())
@@ -266,24 +393,50 @@ def run_training(
         raise RuntimeError("Universe filter removed all rows — aborting training.")
 
     # 4. Feature engineering + labels
-    feat_df = _build_features(bhav)
+    feat_df = _build_features(bhav, use_triple_barrier=use_triple_barrier)
     if feat_df.empty:
         raise RuntimeError("No labelled feature rows — aborting training.")
 
-    # 5. Select feature columns
-    try:
-        from production.signal_generator import BASE_FEATURE_COLS
-    except ImportError:
-        BASE_FEATURE_COLS = []
-    feature_cols = [c for c in BASE_FEATURE_COLS if c in feat_df.columns]
+    # 5. Select feature columns (P29: canonical list enforced everywhere)
+    # Priority: existing feature_cols.json > BASE_FEATURE_COLS > numeric fallback
+    canonical_path = MODEL_DIR / "feature_cols.json"
+    if canonical_path.exists():
+        try:
+            canonical = json.load(open(canonical_path))
+            # Only keep features that exist in this training data
+            feature_cols = [c for c in canonical if c in feat_df.columns]
+            missing = [c for c in canonical if c not in feat_df.columns]
+            if missing:
+                logger.warning("P29: %d canonical features missing from data: %s",
+                               len(missing), missing)
+        except Exception:
+            feature_cols = []
+    else:
+        feature_cols = []
+
     if len(feature_cols) < 10:
-        # Fallback: all numeric except metadata/label
-        exclude = {"SC_CODE", "SC_NAME", "DATE", "Label_fwd5_positive"}
+        try:
+            from production.signal_generator import BASE_FEATURE_COLS
+        except ImportError:
+            BASE_FEATURE_COLS = []
+        feature_cols = [c for c in BASE_FEATURE_COLS if c in feat_df.columns]
+
+    if len(feature_cols) < 10:
+        exclude = {
+            "SC_CODE", "SC_NAME", "DATE",
+            "Label_fwd5_positive", "Label_fwd5_return",
+            "Label_tb_positive", "Label_tb_pct",
+        }
         feature_cols = [
             c for c in feat_df.select_dtypes(include=[np.number]).columns
             if c not in exclude
         ]
-    logger.info("Using %d feature columns", len(feature_cols))
+
+    # P29: Hard subset + assertion — never use X.columns directly
+    feat_df_cols_available = [c for c in feature_cols if c in feat_df.columns]
+    feature_cols = feat_df_cols_available
+    logger.info("P29 MAIN TRAIN COLS (%d): %s", len(feature_cols), sorted(feature_cols))
+    assert len(feature_cols) > 0, "P29: zero feature columns — aborting"
 
     # 6. Train
     model, metrics = _train_lgbm(feat_df, feature_cols, cv_splits, boost_rounds)
@@ -291,9 +444,44 @@ def run_training(
     # 7. Save
     model_path = _save_model(model, feature_cols, metrics)
 
-    # 8. Calibration
+    # 7b. Train XGBoost ensemble member (P12)
+    xgb_model, xgb_metrics = _train_xgb(feat_df, feature_cols, cv_splits, boost_rounds)
+    if xgb_metrics:
+        metrics.update(xgb_metrics)
+
+    # 8. Calibration + calibration curve report (P16)
     if calibrate:
         _fit_calibrator(model, feat_df, feature_cols)
+        try:
+            from production.probability_calibration import calibration_curve_report
+            import pickle
+            label_col = feat_df.attrs.get("label_col", "Label_fwd5_positive")
+            y = feat_df[label_col].dropna().values
+            X_cal = feat_df.loc[feat_df[label_col].notna(), feature_cols].fillna(0).values
+            raw_probs = model.predict(X_cal)
+            cal_path = MODEL_DIR / "calibrator.pkl"
+            if cal_path.exists():
+                with open(cal_path, "rb") as fh:
+                    cal_obj = pickle.load(fh)
+                cal_probs = cal_obj.calibrate(raw_probs)
+            else:
+                cal_probs = None
+            cal_report = calibration_curve_report(
+                y, raw_probs, cal_probs,
+                chart_path=str(MODEL_DIR / "calibration_curve.png"),
+            )
+            metrics["raw_ece"]   = cal_report["raw_ece"]
+            metrics["raw_brier"] = cal_report["raw_brier"]
+            if "cal_ece" in cal_report:
+                metrics["cal_ece"]   = cal_report["cal_ece"]
+                metrics["cal_brier"] = cal_report["cal_brier"]
+            logger.info(
+                "P16 Calibration: raw_ece=%.4f  cal_ece=%s",
+                cal_report["raw_ece"],
+                f"{cal_report.get('cal_ece', 'N/A'):.4f}" if "cal_ece" in cal_report else "N/A",
+            )
+        except Exception as exc:
+            logger.warning("P16 calibration curve report skipped: %s", exc)
 
     logger.info("=" * 60)
     logger.info("Training complete.  CV AUC = %.4f", metrics["mean_auc"])

@@ -69,6 +69,7 @@ except ImportError:
 # Constants
 # ===========================================================================
 NIFTY_TICKER = "^NSEI"
+INDIA_VIX_TICKER = "^INDIAVIX"
 
 # Regime labels (canonical strings used across both classes)
 BULL_TRENDING = "BULL_TRENDING"
@@ -205,31 +206,74 @@ class IndexRegimeFilter:
 
     def compute_emas(self, nifty_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Append EMA50 and EMA200 columns to *nifty_df*.
+        Append EMA10, EMA20, EMA50, EMA200 columns to *nifty_df*.
 
-        Parameters
-        ----------
-        nifty_df : pd.DataFrame
-            Must contain a ``Close`` column.
-
-        Returns
-        -------
-        pd.DataFrame
-            Input DataFrame with ``EMA{fast}`` and ``EMA{slow}`` columns added.
+        P34: Added EMA10 and EMA20 for swing and medium-term 3-layer regime.
         """
         df = nifty_df.copy()
-        df[f"EMA{self.fast_ema}"] = (
-            df["Close"].ewm(span=self.fast_ema, adjust=False).mean()
-        )
-        df[f"EMA{self.slow_ema}"] = (
-            df["Close"].ewm(span=self.slow_ema, adjust=False).mean()
-        )
+        for span in (10, 20, self.fast_ema, self.slow_ema):
+            col = f"EMA{span}"
+            if col not in df.columns:
+                df[col] = df["Close"].ewm(span=span, adjust=False).mean()
         logger.debug(
-            "EMAs computed: EMA%d=%.2f, EMA%d=%.2f (latest row).",
+            "P34 EMAs: EMA10=%.2f EMA20=%.2f EMA%d=%.2f EMA%d=%.2f (latest)",
+            df["EMA10"].iloc[-1], df["EMA20"].iloc[-1],
             self.fast_ema, df[f"EMA{self.fast_ema}"].iloc[-1],
             self.slow_ema, df[f"EMA{self.slow_ema}"].iloc[-1],
         )
         return df
+
+    def get_3layer_regime(self, nifty_df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        P34: 3-layer EMA regime classification.
+
+        Layers:
+        - swing  : EMA10 vs EMA20  (short-term momentum)
+        - medium : EMA20 vs EMA50  (intermediate trend)
+        - long   : EMA50 vs EMA200 (structural trend)
+
+        Combined action:
+        - 0 bearish layers -> NORMAL
+        - 1 bearish layer  -> CAUTIOUS
+        - 2 bearish layers -> TIGHTEN
+        - 3 bearish layers -> SKIP_DAY
+        """
+        required = ("EMA10", "EMA20", f"EMA{self.fast_ema}", f"EMA{self.slow_ema}")
+        for col in required:
+            if col not in nifty_df.columns:
+                raise KeyError(f"P34: '{col}' missing — call compute_emas() first.")
+
+        latest = nifty_df.iloc[-1]
+        ema10  = float(latest["EMA10"])
+        ema20  = float(latest["EMA20"])
+        ema50  = float(latest[f"EMA{self.fast_ema}"])
+        ema200 = float(latest[f"EMA{self.slow_ema}"])
+
+        swing_up  = ema10 > ema20
+        medium_up = ema20 > ema50
+        long_up   = ema50 > ema200
+
+        bearish_count = sum([not swing_up, not medium_up, not long_up])
+        action_map = {0: "NORMAL", 1: "CAUTIOUS", 2: "TIGHTEN", 3: "SKIP_DAY"}
+        action = action_map[bearish_count]
+
+        result: Dict[str, Any] = {
+            "swing_layer":    "UP" if swing_up  else "DOWN",
+            "medium_layer":   "UP" if medium_up else "DOWN",
+            "long_layer":     "UP" if long_up   else "DOWN",
+            "bearish_layers": bearish_count,
+            "action":         action,
+            "ema10":  round(ema10, 2),
+            "ema20":  round(ema20, 2),
+            "ema50":  round(ema50, 2),
+            "ema200": round(ema200, 2),
+        }
+        logger.info(
+            "P34 EMA-3LAYER: swing=%s  medium=%s  long=%s  action=%s",
+            result["swing_layer"], result["medium_layer"],
+            result["long_layer"],  action,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Regime classification
@@ -389,34 +433,33 @@ class IndexRegimeFilter:
 
 class HMMRegimeDetector:
     """
-    4-state Hidden Markov Model for granular market regime detection.
+    2-state Hidden Markov Model for market regime detection.
+
+    P32: Reduced from 4-state full-covariance to 2-state diagonal-covariance.
+    Root cause of prior non-convergence: 148 obs insufficient for 4×n² cov params.
 
     States (labels assigned post-fit based on regime statistics):
-    - BULL_TRENDING   : high positive mean return, low-moderate volatility
-    - BEAR_TRENDING   : negative mean return
-    - HIGH_VOLATILITY : large absolute swings regardless of direction
-    - SIDEWAYS        : near-zero return, low volatility
+    - BULL_TRENDING : positive mean return (trending)
+    - SIDEWAYS      : near-zero or negative return (sideways / risk-off)
 
     Parameters
     ----------
     n_states : int
-        Number of HMM states (default 4).
+        Number of HMM states (default 2).
     feature_window : int
         Rolling window (in days) used to compute volatility and z-score
         features (default 20).
     """
 
-    # Mean-return thresholds for regime labelling
-    BULL_RETURN_THRESHOLD = 0.0005
-    BEAR_RETURN_THRESHOLD = -0.0005
-    HIGH_VOL_THRESHOLD = 0.015
+    BULL_RETURN_THRESHOLD = 0.0002
 
-    def __init__(self, n_states: int = 4, feature_window: int = 20) -> None:
+    def __init__(self, n_states: int = 2, feature_window: int = 20) -> None:
         self.n_states = n_states
         self.feature_window = feature_window
         self.model: Optional[Any] = None
         self.regime_stats: Optional[Dict[int, Dict]] = None
         self._label_cache: Dict[int, str] = {}
+        self._converged: bool = False
         logger.info(
             "HMMRegimeDetector init: n_states=%d, feature_window=%d",
             n_states, feature_window,
@@ -507,55 +550,39 @@ class HMMRegimeDetector:
 
         if HMM_AVAILABLE:
             logger.info(
-                "Fitting GaussianHMM (n_components=%d) on %d observations …",
-                self.n_states, n_obs,
+                "P32: Fitting 2-state diag GaussianHMM on %d observations …", n_obs,
             )
-            hmm_fitted = False
-            # Try progressively larger regularisation if covariance is singular
-            for reg_covar in (1e-3, 1e-2, 1e-1):
-                try:
-                    self.model = GaussianHMM(
-                        n_components=self.n_states,
-                        covariance_type="full",
-                        n_iter=1000,
-                        random_state=42,
-                    )
-                    self.model.fit(X)
-                    state_seq = self.model.predict(X)
-                    hmm_fitted = True
-                    break
-                except Exception as hmm_exc:
-                    logger.warning(
-                        "GaussianHMM fit failed (reg_covar=%.0e): %s — retrying "
-                        "with diagonal covariance …", reg_covar, hmm_exc
-                    )
-                    try:
-                        self.model = GaussianHMM(
-                            n_components=self.n_states,
-                            covariance_type="diag",
-                            n_iter=1000,
-                            random_state=42,
-                        )
-                        self.model.fit(X)
-                        state_seq = self.model.predict(X)
-                        hmm_fitted = True
-                        break
-                    except Exception as diag_exc:
-                        logger.warning(
-                            "GaussianHMM diag fit also failed: %s", diag_exc
-                        )
-
-            if not hmm_fitted:
-                logger.warning(
-                    "All HMM fit attempts failed — falling back to quantile method."
+            try:
+                _model = GaussianHMM(
+                    n_components=self.n_states,
+                    covariance_type="diag",
+                    n_iter=300,
+                    tol=1e-4,
+                    init_params="kmeans",
+                    random_state=42,
                 )
+                _model.fit(X)
+                self._converged = bool(_model.monitor_.converged)
+                if not self._converged:
+                    logger.warning(
+                        "P32: HMM did not converge after 300 iterations "
+                        "(n_obs=%d, n_states=%d). Falling back to EMA-only.",
+                        n_obs, self.n_states,
+                    )
+                    self.model = None
+                    state_seq = self._quantile_fallback(X[:, 0])
+                else:
+                    self.model = _model
+                    state_seq = _model.predict(X)
+                    logger.info("P32: HMM converged in %d iterations.", _model.monitor_.iter)
+            except Exception as hmm_exc:
+                logger.warning("P32: GaussianHMM fit raised %s — EMA-only fallback.", hmm_exc)
                 self.model = None
+                self._converged = False
                 state_seq = self._quantile_fallback(X[:, 0])
         else:
-            logger.warning(
-                "hmmlearn unavailable — using quantile-based fallback for fit()."
-            )
-            state_seq = self._quantile_fallback(X[:, 0])  # use raw return col
+            logger.warning("hmmlearn unavailable — using quantile-based fallback for fit().")
+            state_seq = self._quantile_fallback(X[:, 0])
 
         # Compute per-state statistics from the training data
         ret_col = X[:, 0]
@@ -588,20 +615,11 @@ class HMMRegimeDetector:
 
     def _quantile_fallback(self, returns: np.ndarray) -> np.ndarray:
         """
-        Assign states by quantile buckets when hmmlearn is not available.
-        This is a crude approximation — install hmmlearn for proper HMM.
+        2-state fallback when hmmlearn is unavailable or HMM did not converge.
+        State 0 = above-median return (trending), State 1 = below (sideways).
         """
-        q25, q50, q75 = np.percentile(returns, [25, 50, 75])
-        states = np.zeros(len(returns), dtype=int)
-        states[returns >= q75] = 0   # high return -> state 0 (bull-ish)
-        states[(returns >= q50) & (returns < q75)] = 3  # moderate -> sideways
-        states[(returns >= q25) & (returns < q50)] = 3
-        states[returns < q25] = 1   # low return -> bear-ish
-        # assign high-vol state (2) based on absolute return magnitude
-        abs_r = np.abs(returns)
-        high_vol_thresh = np.percentile(abs_r, 85)
-        states[abs_r >= high_vol_thresh] = 2
-        return states
+        median = float(np.median(returns))
+        return np.where(returns >= median, 0, 1).astype(int)
 
     # ------------------------------------------------------------------
     # Prediction
@@ -639,15 +657,15 @@ class HMMRegimeDetector:
 
         if HMM_AVAILABLE and self.model is not None:
             state_seq = self.model.predict(X)
-            # Posterior state probabilities for the last observation
             posteriors = self.model.predict_proba(X)
             last_probs = posteriors[-1].tolist()
             regime_id = int(state_seq[-1])
         else:
-            # Fallback: use last feature row and compute nearest state
+            if not self._converged and HMM_AVAILABLE:
+                # P32: HMM did not converge — return UNKNOWN so caller uses EMA
+                return {"regime_id": -1, "regime_label": "UNKNOWN", "confidence": 0.0, "regime_probs": []}
             state_seq = self._quantile_fallback(X[:, 0])
             regime_id = int(state_seq[-1])
-            # Uniform probability with winner boosted
             last_probs = [0.05] * self.n_states
             last_probs[regime_id] = 1.0 - 0.05 * (self.n_states - 1)
 
@@ -660,7 +678,7 @@ class HMMRegimeDetector:
             "confidence": round(confidence, 4),
             "regime_probs": [round(p, 4) for p in last_probs],
         }
-        logger.info("HMM prediction: %s", result)
+        logger.info("P32 HMM prediction: %s  converged=%s", result, self._converged)
         return result
 
     # ------------------------------------------------------------------
@@ -669,36 +687,12 @@ class HMMRegimeDetector:
 
     def label_regime(self, regime_id: int) -> str:
         """
-        Assign a human-readable label to a state based on its training statistics.
-
-        Classification rules (applied in order):
-        1. mean_return > BULL_RETURN_THRESHOLD  -> BULL_TRENDING
-        2. mean_return < BEAR_RETURN_THRESHOLD  -> BEAR_TRENDING
-        3. std_return  > HIGH_VOL_THRESHOLD     -> HIGH_VOLATILITY
-        4. Otherwise                            -> SIDEWAYS
-
-        Parameters
-        ----------
-        regime_id : int
-
-        Returns
-        -------
-        str
+        P32: 2-state labelling — BULL_TRENDING or SIDEWAYS based on mean return.
         """
         if self.regime_stats is None or regime_id not in self.regime_stats:
             return SIDEWAYS
-
-        stats = self.regime_stats[regime_id]
-        mean_ret = stats["mean_return"]
-        std_ret = stats["std_return"]
-
-        if mean_ret > self.BULL_RETURN_THRESHOLD:
-            return BULL_TRENDING
-        if mean_ret < self.BEAR_RETURN_THRESHOLD:
-            return BEAR_TRENDING
-        if std_ret > self.HIGH_VOL_THRESHOLD:
-            return HIGH_VOLATILITY
-        return SIDEWAYS
+        mean_ret = self.regime_stats[regime_id]["mean_return"]
+        return BULL_TRENDING if mean_ret > self.BULL_RETURN_THRESHOLD else SIDEWAYS
 
     # ------------------------------------------------------------------
     # Regime-adjusted trading parameters
@@ -803,7 +797,121 @@ class HMMRegimeDetector:
 
 
 # ===========================================================================
-# 3.  Combined regime assessment
+# 3.  India VIX Gate  (P11)
+# ===========================================================================
+
+class IndiaVIXGate:
+    """
+    P11 -- India VIX-based volatility regime gate.
+
+    When India VIX exceeds ``halt_threshold`` (default 25), new long entries
+    are blocked.  Between ``warn_threshold`` (default 20) and ``halt_threshold``
+    the position-size multiplier is reduced to discourage new exposure.
+
+    VIX data is fetched via yfinance (ticker ``^INDIAVIX``).  If yfinance is
+    unavailable or the download fails, the gate defaults to ALLOW (conservatively
+    assumes normal volatility) and logs a WARNING.
+
+    Parameters
+    ----------
+    halt_threshold : float
+        VIX level above which ``is_tradeable`` becomes False (default 25.0).
+    warn_threshold : float
+        VIX level above which position-size multiplier is halved (default 20.0).
+    lookback_days : int
+        Calendar days of VIX history to fetch (default 30).
+    """
+
+    def __init__(
+        self,
+        halt_threshold: float = 25.0,
+        warn_threshold: float = 20.0,
+        lookback_days: int = 30,
+    ) -> None:
+        self.halt_threshold = halt_threshold
+        self.warn_threshold = warn_threshold
+        self.lookback_days = lookback_days
+
+    def fetch_vix(self) -> Optional[float]:
+        """
+        Return the latest India VIX close, or None if unavailable.
+        """
+        if not YFINANCE_AVAILABLE:
+            logger.warning("P11 VIX: yfinance unavailable — skipping VIX gate.")
+            return None
+        try:
+            end = datetime.today()
+            start = end - timedelta(days=self.lookback_days)
+            raw = yf.Ticker(INDIA_VIX_TICKER).history(
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+                interval="1d",
+            )
+            if raw.empty:
+                logger.warning("P11 VIX: empty response from yfinance.")
+                return None
+            vix = float(raw["Close"].iloc[-1])
+            logger.info("P11 VIX: latest India VIX = %.2f", vix)
+            return vix
+        except Exception as exc:
+            logger.warning("P11 VIX: fetch failed (%s) — defaulting to ALLOW.", exc)
+            return None
+
+    def assess(self, vix: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Evaluate VIX and return a gate assessment dict.
+
+        Parameters
+        ----------
+        vix : float, optional
+            Pre-fetched VIX value; fetched automatically if None.
+
+        Returns
+        -------
+        dict with keys:
+            vix_level (float | None),
+            vix_is_tradeable (bool),
+            vix_regime (str),       -- 'NORMAL' | 'ELEVATED' | 'EXTREME'
+            vix_size_multiplier (float)
+        """
+        if vix is None:
+            vix = self.fetch_vix()
+
+        if vix is None:
+            return {
+                "vix_level": None,
+                "vix_is_tradeable": True,
+                "vix_regime": "UNKNOWN",
+                "vix_size_multiplier": 1.0,
+            }
+
+        if vix >= self.halt_threshold:
+            regime = "EXTREME"
+            tradeable = False
+            size_mult = 0.0
+        elif vix >= self.warn_threshold:
+            regime = "ELEVATED"
+            tradeable = True
+            size_mult = 0.5
+        else:
+            regime = "NORMAL"
+            tradeable = True
+            size_mult = 1.0
+
+        logger.info(
+            "P11 VIX: level=%.2f  regime=%s  tradeable=%s  size_mult=%.2f",
+            vix, regime, tradeable, size_mult,
+        )
+        return {
+            "vix_level": round(vix, 2),
+            "vix_is_tradeable": tradeable,
+            "vix_regime": regime,
+            "vix_size_multiplier": size_mult,
+        }
+
+
+# ===========================================================================
+# 4.  Combined regime assessment
 # ===========================================================================
 
 def get_combined_regime(nifty_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
@@ -842,6 +950,10 @@ def get_combined_regime(nifty_data: Optional[pd.DataFrame] = None) -> Dict[str, 
     ema_report = ema_filter.get_regime_report(nifty_data)
     ema_regime = ema_report["regime"]  # 'BULL', 'BEAR', 'SIDEWAYS'
 
+    # --- P34: 3-layer EMA regime -----------------------------------------
+    three_layer = ema_filter.get_3layer_regime(nifty_data)
+    three_layer_action = three_layer["action"]
+
     # --- HMM layer -------------------------------------------------------
     returns = nifty_data["Close"].pct_change().dropna()
 
@@ -851,28 +963,58 @@ def get_combined_regime(nifty_data: Optional[pd.DataFrame] = None) -> Dict[str, 
         hmm_detector.fit(returns)
         hmm_result = hmm_detector.predict_current_regime(returns)
     except Exception as exc:
-        logger.warning("HMM layer failed (%s) — using EMA regime only.", exc)
-        hmm_result = {
-            "regime_id": -1,
-            "regime_label": SIDEWAYS,
-            "confidence": 0.5,
-            "regime_probs": [],
-        }
+        logger.warning("P32: HMM layer failed (%s) — using EMA regime only.", exc)
+        hmm_result = {"regime_id": -1, "regime_label": "UNKNOWN", "confidence": 0.0, "regime_probs": []}
 
-    hmm_label = hmm_result.get("regime_label", SIDEWAYS)
+    hmm_label = hmm_result.get("regime_label", "UNKNOWN")
+
+    # --- India VIX gate (P11) --------------------------------------------
+    vix_gate = IndiaVIXGate()
+    vix_assessment = vix_gate.assess()
 
     # --- Combine ---------------------------------------------------------
-    if ema_regime == "BEAR":
+    # P32: when HMM is UNKNOWN (non-convergence), override with EMA signal
+    hmm_usable = hmm_label not in ("UNKNOWN", SIDEWAYS)
+    ema_bull = ema_regime == "BULL"
+    ema_bear = ema_regime == "BEAR"
+
+    if ema_bear:
         combined_label = BEAR_TRENDING
-    elif ema_regime == "BULL" and hmm_label == BULL_TRENDING:
+    elif ema_bull and (hmm_label == BULL_TRENDING or not hmm_usable):
         combined_label = BULL_TRENDING
-    else:
+    elif hmm_usable:
         combined_label = hmm_label
+    else:
+        combined_label = SIDEWAYS  # EMA SIDEWAYS + HMM unavailable
+
+    # P32: log conflict when HMM and EMA disagree
+    ema_implied = BULL_TRENDING if ema_bull else (BEAR_TRENDING if ema_bear else SIDEWAYS)
+    if hmm_usable and hmm_label != ema_implied:
+        logger.warning(
+            "P32 HMM-EMA CONFLICT: HMM=%s vs EMA_implied=%s — using EMA-anchored label=%s",
+            hmm_label, ema_implied, combined_label,
+        )
 
     params = hmm_detector.get_regime_adjusted_params(combined_label)
 
-    # is_tradeable: not in hard bear regime
-    is_tradeable = combined_label != BEAR_TRENDING
+    # is_tradeable: also blocked when 3-layer says SKIP_DAY
+    is_tradeable = (
+        combined_label != BEAR_TRENDING
+        and vix_assessment["vix_is_tradeable"]
+        and three_layer_action != "SKIP_DAY"
+    )
+
+    # P34: apply 3-layer size reduction on top of regime + VIX multipliers
+    three_layer_mult = {
+        "NORMAL": 1.0, "CAUTIOUS": 0.85, "TIGHTEN": 0.65, "SKIP_DAY": 0.0
+    }.get(three_layer_action, 1.0)
+
+    size_mult = round(
+        params["position_size_multiplier"]
+        * vix_assessment["vix_size_multiplier"]
+        * three_layer_mult,
+        4,
+    )
 
     result: Dict[str, Any] = {
         "ema_regime": ema_regime,
@@ -880,16 +1022,24 @@ def get_combined_regime(nifty_data: Optional[pd.DataFrame] = None) -> Dict[str, 
         "combined_label": combined_label,
         "is_tradeable": is_tradeable,
         "recommended_threshold": params["probability_threshold"],
-        "position_size_multiplier": params["position_size_multiplier"],
+        "position_size_multiplier": size_mult,
         "max_positions": params["max_positions"],
         "nifty_close": ema_report["nifty_close"],
         "ema50": ema_report["ema50"],
         "ema200": ema_report["ema200"],
         "trend_strength": ema_report["trend_strength"],
         "hmm_confidence": hmm_result.get("confidence", 0.0),
+        "hmm_converged": hmm_detector._converged,
+        "vix_level": vix_assessment["vix_level"],
+        "vix_regime": vix_assessment["vix_regime"],
+        # P34: 3-layer EMA detail
+        "three_layer_swing":   three_layer["swing_layer"],
+        "three_layer_medium":  three_layer["medium_layer"],
+        "three_layer_long":    three_layer["long_layer"],
+        "three_layer_action":  three_layer_action,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
-    logger.info("Combined regime: %s", result)
+    logger.info("P32/P34 Combined regime: %s", result)
     return result
 
 
@@ -918,7 +1068,7 @@ if __name__ == "__main__":
     # --- HMMRegimeDetector -----------------------------------------------
     print("\n[2] HMMRegimeDetector")
     returns_s = nifty["Close"].pct_change().dropna()
-    det = HMMRegimeDetector(n_states=4, feature_window=20)
+    det = HMMRegimeDetector(n_states=2, feature_window=20)
     det.fit(returns_s)
     pred = det.predict_current_regime(returns_s)
     for k, v in pred.items():

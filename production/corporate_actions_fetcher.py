@@ -21,10 +21,19 @@ import logging
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 import requests
+
+# BSE Python package (PyPI: bse) — direct BSE India API, no scraping
+try:
+    from bse import BSE as _BSEClient
+    BSE_PKG_AVAILABLE = True
+except ImportError:
+    BSE_PKG_AVAILABLE = False
+    logger_init = logging.getLogger(__name__)
+    logger_init.warning("bse package not installed — run: pip install bse")
 
 logger = logging.getLogger(__name__)
 
@@ -120,12 +129,21 @@ class CorporateActionsFetcher:
                 logger.info("Corporate actions loaded from cache (%d records).", len(df))
                 return self._filter(df, start_dt, end_dt, action_types)
 
-        # Try NSE API
-        df = self._fetch_nse(start_dt, end_dt)
+        # P28: Try BSE Python package first (most reliable — direct BSE API)
+        df = None
+        if BSE_PKG_AVAILABLE:
+            logger.info("P28: fetching corporate actions via bse Python package …")
+            df = None   # Per-stock fetch happens in fetch_for_universe(); here use legacy flow
+            # Fall through to NSE/BSE HTTP as general fetcher; universe-specific
+            # batch is in fetch_for_universe() called by the orchestrator.
 
-        # Fallback to BSE if NSE failed or returned little data
+        # Try NSE API
+        if df is None or (df is not None and len(df) < 10):
+            df = self._fetch_nse(start_dt, end_dt)
+
+        # Fallback to BSE HTTP if NSE failed or returned little data
         if df is None or len(df) < 10:
-            logger.info("NSE returned little data; trying BSE fallback …")
+            logger.info("NSE returned little data; trying BSE HTTP fallback …")
             bse_df = self._fetch_bse(start_dt, end_dt)
             if bse_df is not None and not bse_df.empty:
                 df = pd.concat([df, bse_df], ignore_index=True) if df is not None else bse_df
@@ -226,7 +244,148 @@ class CorporateActionsFetcher:
             return None
 
     # ------------------------------------------------------------------
-    # BSE fallback fetch
+    # BSE Python package fetch (P28 — primary source)
+    # ------------------------------------------------------------------
+
+    def _fetch_bse_package(
+        self, sc_codes: Optional[List[str]] = None, start_dt: Optional[date] = None
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch corporate actions per stock using the `bse` PyPI package.
+        Direct BSE India API — no URL scraping, no NSE dependency.
+
+        Parameters
+        ----------
+        sc_codes : list of BSE scrip codes; if None fetches for an empty set
+                   (returns empty).
+        start_dt : Filter out actions before this date.
+
+        Returns
+        -------
+        DataFrame or None
+        """
+        if not BSE_PKG_AVAILABLE:
+            logger.warning("P28: bse package unavailable — cannot use direct BSE API.")
+            return None
+        if not sc_codes:
+            return None
+
+        bse_cache_dir = Path("tmp/bse_cache")
+        bse_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        rows = []
+        for sc_code in sc_codes:
+            try:
+                with _BSEClient(download_folder=str(bse_cache_dir)) as bse_client:
+                    data = bse_client.actions(scripcode=str(sc_code))
+
+                if not data or "Table" not in data:
+                    continue
+
+                for row in data["Table"]:
+                    ex_date_str = str(row.get("ExDate") or "").strip()
+                    purpose     = str(row.get("Purpose") or "").strip()
+                    try:
+                        ex_date = pd.to_datetime(ex_date_str).date()
+                    except Exception:
+                        continue
+
+                    if start_dt and ex_date < start_dt:
+                        continue
+
+                    purpose_upper = purpose.upper()
+                    action_type, ratio, bonus_denom = self._parse_purpose(purpose.lower())
+                    if action_type is None:
+                        continue
+
+                    rows.append({
+                        "SC_CODE":     str(sc_code),
+                        "SC_NAME":     str(row.get("ShortName") or sc_code),
+                        "EX_DATE":     ex_date,
+                        "ACTION_TYPE": action_type,
+                        "RATIO":       ratio,
+                        "BONUS_DENOM": bonus_denom,
+                        "SOURCE":      "BSE_PKG",
+                    })
+
+            except Exception as exc:
+                logger.warning(
+                    "P28: BSE package fetch failed for %s: %s — skipping.", sc_code, exc
+                )
+                continue
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        logger.info("P28 BSE package: fetched %d corporate actions for %d stocks.",
+                    len(df), len(sc_codes))
+        return df
+
+    def fetch_for_universe(
+        self,
+        sc_codes: List[str],
+        cache_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Batch-fetch corporate actions for a full tradable universe using the
+        BSE Python package.  Results are cached to a date-stamped JSON file
+        (valid for 1 calendar day).
+
+        Parameters
+        ----------
+        sc_codes : List of BSE scrip codes for all tradable stocks.
+        cache_date : 'YYYY-MM-DD'; defaults to today.
+
+        Returns
+        -------
+        DataFrame with corporate actions for the universe.
+        """
+        today = cache_date or date.today().isoformat()
+        cache_path = self.cache_file.parent / f"corporate_actions_{today}.json"
+
+        # Load daily cache if it exists (valid for 1 calendar day)
+        if cache_path.exists():
+            try:
+                with open(cache_path, encoding="utf-8") as fh:
+                    cached = json.load(fh)
+                df = pd.DataFrame(cached)
+                df["EX_DATE"] = pd.to_datetime(df["EX_DATE"]).dt.date
+                logger.info(
+                    "P28: corporate actions cache hit — %d records (%s)", len(df), today
+                )
+                return df
+            except Exception as exc:
+                logger.warning("P28: daily cache load failed (%s) — re-fetching.", exc)
+
+        start_dt = date.today() - timedelta(days=730)
+        df = self._fetch_bse_package(sc_codes, start_dt=start_dt)
+
+        if df is None or df.empty:
+            logger.warning(
+                "P28: BSE package returned no data for %d stocks.", len(sc_codes)
+            )
+            return pd.DataFrame(
+                columns=["SC_CODE", "SC_NAME", "EX_DATE", "ACTION_TYPE",
+                         "RATIO", "BONUS_DENOM", "SOURCE"]
+            )
+
+        # Persist daily cache
+        try:
+            records = df.copy()
+            records["EX_DATE"] = records["EX_DATE"].astype(str)
+            with open(cache_path, "w", encoding="utf-8") as fh:
+                json.dump(records.to_dict("records"), fh)
+            logger.info(
+                "P28: cached %d corporate actions -> %s", len(df), cache_path
+            )
+        except Exception as exc:
+            logger.warning("P28: daily cache save failed: %s", exc)
+
+        return df
+
+    # ------------------------------------------------------------------
+    # BSE HTTP fallback fetch (legacy)
     # ------------------------------------------------------------------
 
     def _fetch_bse(self, start_dt: date, end_dt: date) -> Optional[pd.DataFrame]:

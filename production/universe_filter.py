@@ -464,15 +464,140 @@ class TradabilityGate:
 
 
 # ===========================================================================
+# P06 — Operator / pump filter
+# ===========================================================================
+
+def filter_operator_driven(
+    df: pd.DataFrame,
+    lookback: int = 10,
+    max_circuits: int = 2,
+) -> pd.DataFrame:
+    """
+    Remove stocks that have hit the BSE upper circuit on more than
+    *max_circuits* sessions in the last *lookback* trading sessions.
+
+    BSE upper circuit threshold: (Close - prev_Close) / prev_Close >= 0.195
+    (the official limit is 20 %; 0.195 gives a small buffer for rounding).
+
+    These stocks are likely operator- or news-driven momentum plays that
+    the swing-trade model was not trained to handle, and holding them
+    creates undue overnight risk.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Multi-stock BhavCopy with SC_CODE, DATE, Close columns.
+    lookback : int
+        Number of trading sessions to examine (default 10).
+    max_circuits : int
+        Maximum allowed circuit-hit count.  Stocks exceeding this are
+        removed (default 2 — more than 2 upper-circuit days in 10 is a
+        red flag).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of *df* with operator-driven stocks removed.
+    """
+    out = df.copy()
+    out["DATE"] = pd.to_datetime(out["DATE"])
+    out = out.sort_values(["SC_CODE", "DATE"])
+
+    # Compute daily return per stock
+    out["_prev_close"] = out.groupby("SC_CODE")["Close"].shift(1)
+    out["_daily_ret"]  = (out["Close"] - out["_prev_close"]) / out["_prev_close"].replace(0, np.nan)
+
+    # Restrict to the most-recent *lookback* trading days across the dataset
+    all_dates  = sorted(out["DATE"].unique())
+    recent_dates = set(all_dates[-lookback:]) if len(all_dates) >= lookback else set(all_dates)
+    recent = out[out["DATE"].isin(recent_dates)]
+
+    # Count upper-circuit hits per stock
+    circuit_counts = (
+        recent[recent["_daily_ret"] >= 0.195]
+        .groupby("SC_CODE")
+        .size()
+    )
+    pumped_codes = set(circuit_counts[circuit_counts > max_circuits].index.tolist())
+
+    before = out["SC_CODE"].nunique()
+    result = out[~out["SC_CODE"].isin(pumped_codes)].drop(
+        columns=["_prev_close", "_daily_ret"], errors="ignore"
+    )
+    removed = before - result["SC_CODE"].nunique()
+    if removed:
+        logger.info(
+            "filter_operator_driven: removed %d operator-driven/pumped stocks "
+            "(>%d upper circuits in last %d sessions).",
+            removed, max_circuits, lookback,
+        )
+    return result
+
+
+# ===========================================================================
+# P06 — Post-IPO / recent-listing exclusion filter
+# ===========================================================================
+
+def filter_recent_listings(
+    df: pd.DataFrame,
+    min_sessions: int = 90,
+) -> pd.DataFrame:
+    """
+    Remove stocks that have fewer than *min_sessions* trading-day rows in
+    *df*.
+
+    Rationale: momentum features (EMA200, rolling Highs, RS_Composite, etc.)
+    require 63-200 sessions of history.  Stocks with fewer sessions produce
+    garbage feature values and unreliable predictions.  90 sessions (~4
+    months) ensures all 63-day features are fully populated with a modest
+    safety margin.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Multi-stock BhavCopy with SC_CODE and DATE columns.
+    min_sessions : int
+        Minimum number of unique trading days required (default 90).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of *df* with recently listed stocks removed.
+    """
+    out = df.copy()
+    out["DATE"] = pd.to_datetime(out["DATE"])
+
+    session_counts = out.groupby("SC_CODE")["DATE"].nunique()
+    qualified      = session_counts[session_counts >= min_sessions].index.tolist()
+
+    before  = out["SC_CODE"].nunique()
+    result  = out[out["SC_CODE"].isin(qualified)]
+    removed = before - len(qualified)
+    if removed:
+        logger.info(
+            "filter_recent_listings: removed %d stocks with < %d sessions "
+            "(recent IPOs / insufficient history).",
+            removed, min_sessions,
+        )
+    return result
+
+
+# ===========================================================================
 # Module-level convenience function
 # ===========================================================================
 def apply_tradability_gate(
     bhav_df: pd.DataFrame,
     reference_date: Any,
+    apply_operator_filter: bool = True,
+    apply_ipo_filter: bool = True,
+    operator_lookback: int = 10,
+    operator_max_circuits: int = 2,
+    min_sessions: int = 90,
     **kwargs: Any,
 ) -> pd.DataFrame:
     """
-    Convenience wrapper: instantiate ``TradabilityGate`` and apply it.
+    Convenience wrapper: instantiate ``TradabilityGate`` and apply it,
+    then run the operator-driven pump filter and post-IPO exclusion.
 
     Parameters
     ----------
@@ -480,6 +605,16 @@ def apply_tradability_gate(
         Multi-stock BhavCopy.
     reference_date : date-like
         Snapshot date for filters.
+    apply_operator_filter : bool
+        Apply the upper-circuit / pump filter (default True).
+    apply_ipo_filter : bool
+        Apply the recent-listing exclusion filter (default True).
+    operator_lookback : int
+        Sessions to scan for upper circuits (default 10).
+    operator_max_circuits : int
+        Max permitted circuit hits (default 2).
+    min_sessions : int
+        Minimum session history required (default 90).
     **kwargs
         Passed directly to ``TradabilityGate.__init__``.
         Valid keys: min_value_crore, min_price, min_avg_volume,
@@ -488,15 +623,30 @@ def apply_tradability_gate(
     Returns
     -------
     pd.DataFrame
-        Filtered BhavCopy with only tradable stocks.
+        Filtered BhavCopy with only tradable, clean stocks.
 
     Examples
     --------
     >>> tradable = apply_tradability_gate(bhav, "2024-03-15",
     ...                                  min_price=50, min_value_crore=5)
     """
+    # Step 1 — liquidity / price gate
     gate = TradabilityGate(**kwargs)
-    return gate.apply(bhav_df, reference_date)
+    result = gate.apply(bhav_df, reference_date)
+
+    # Step 2 — operator / pump filter
+    if apply_operator_filter:
+        result = filter_operator_driven(
+            result,
+            lookback=operator_lookback,
+            max_circuits=operator_max_circuits,
+        )
+
+    # Step 3 — post-IPO / insufficient-history filter
+    if apply_ipo_filter:
+        result = filter_recent_listings(result, min_sessions=min_sessions)
+
+    return result
 
 
 # ===========================================================================

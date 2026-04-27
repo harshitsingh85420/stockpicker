@@ -419,6 +419,229 @@ class OperationalFallback:
 
 
 # ---------------------------------------------------------------------------
+# P06 — Multi-source BhavCopy failover
+# ---------------------------------------------------------------------------
+
+class DataSourceFailover:
+    """
+    Attempt to obtain a full BhavCopy DataFrame from multiple data sources,
+    trying each in priority order.  If all sources fail the caller should
+    trigger SKIP_DAY.
+
+    Priority:
+      1. BSE BhavCopy  (existing DataLoader / BSEDataFetcher)
+      2. NSE BhavCopy  (CSV zip download from NSE archives)
+      3. yfinance      (bulk download for top Nifty 500 stocks)
+      4. None          -> caller must set SKIP_DAY = True
+    """
+
+    # NSE BhavCopy archive template
+    _NSE_BHAV_URL = (
+        "https://nsearchives.nseindia.com/content/historical/EQUITIES"
+        "/{year}/{mon}/cm{date_str}bhav.csv.zip"
+    )
+    _NSE_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer":    "https://www.nseindia.com/",
+        "Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    def __init__(
+        self,
+        cache_dir: str = "stock_picker_data/cache/bse",
+        lookback_days: int = 730,
+        alert_manager: "AlertManager" = None,
+    ):
+        self.cache_dir    = Path(cache_dir)
+        self.lookback_days = lookback_days
+        self.alert        = alert_manager or AlertManager()
+
+    # ------------------------------------------------------------------
+    def fetch_bhav(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """
+        Return a standardised BhavCopy DataFrame for the period ending
+        on *trade_date*, trying each source in order.
+
+        Columns guaranteed in result:
+            SC_CODE, DATE, Open, High, Low, Close, Volume
+
+        Returns None only if ALL sources fail.
+        """
+        sources = [
+            ("BSE BhavCopy",  self._fetch_bse),
+            ("NSE BhavCopy",  self._fetch_nse),
+            ("yfinance",      self._fetch_yfinance),
+        ]
+        last_error = None
+        for source_name, fn in sources:
+            try:
+                logger.info("DataSourceFailover: trying %s ...", source_name)
+                df = fn(trade_date)
+                if df is not None and not df.empty and len(df) > 100:
+                    logger.info(
+                        "DataSourceFailover: %s succeeded — %d rows, %d stocks.",
+                        source_name, len(df), df["SC_CODE"].nunique(),
+                    )
+                    if source_name != "BSE BhavCopy":
+                        self.alert.send(
+                            subject=f"Data Failover: using {source_name}",
+                            body=(
+                                f"BSE BhavCopy was unavailable. "
+                                f"Loaded {len(df)} rows from {source_name}.\n"
+                                f"Date: {trade_date}"
+                            ),
+                            level="WARNING",
+                        )
+                    return df
+                logger.warning("DataSourceFailover: %s returned empty data.", source_name)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("DataSourceFailover: %s failed — %s", source_name, exc)
+
+        # All sources failed
+        self.alert.send(
+            subject="ALL data sources failed — SKIP_DAY",
+            body=(
+                f"Date: {trade_date}\n"
+                f"BSE BhavCopy, NSE BhavCopy, and yfinance all failed.\n"
+                f"Last error: {last_error}\n\n"
+                "Action: SKIP_DAY.  No stale T-1 data will be used."
+            ),
+            level="CRITICAL",
+        )
+        logger.critical(
+            "DataSourceFailover: all sources exhausted for %s.  SKIP_DAY.",
+            trade_date,
+        )
+        return None
+
+    # ------------------------------------------------------------------
+    def _fetch_bse(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """Primary: BSE BhavCopy via existing DataLoader."""
+        from production.data_loader import DataLoader
+        loader = DataLoader(cache_dir=str(self.cache_dir))
+        df = loader.load(lookback_days=self.lookback_days, end=trade_date)
+        if df is None or df.empty:
+            raise RuntimeError("DataLoader returned empty DataFrame")
+        return df
+
+    # ------------------------------------------------------------------
+    def _fetch_nse(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """
+        Fallback 1: Download NSE BhavCopy CSV zip for *trade_date* and the
+        preceding lookback_days, then convert to BSE-compatible schema.
+        """
+        import io
+        import zipfile
+        import calendar
+        import requests
+
+        td  = pd.to_datetime(trade_date)
+        start = td - pd.Timedelta(days=self.lookback_days + 60)
+
+        frames = []
+        current = start
+        while current <= td:
+            if current.weekday() >= 5:     # skip weekends
+                current += pd.Timedelta(days=1)
+                continue
+
+            year    = current.strftime("%Y")
+            mon     = current.strftime("%b").upper()       # e.g. JAN
+            date_str = current.strftime("%d%b%Y").upper()  # e.g. 01JAN2024
+            url = self._NSE_BHAV_URL.format(year=year, mon=mon, date_str=date_str)
+
+            try:
+                r = requests.get(url, headers=self._NSE_HEADERS, timeout=15)
+                if not r.ok:
+                    current += pd.Timedelta(days=1)
+                    continue
+                zf  = zipfile.ZipFile(io.BytesIO(r.content))
+                csv = zf.open(zf.namelist()[0])
+                day = pd.read_csv(csv)
+                day.columns = day.columns.str.strip()
+
+                # NSE columns: SYMBOL, SERIES, OPEN, HIGH, LOW, CLOSE, TOTTRDQTY, ...
+                day = day[day.get("SERIES", day.get("Series", pd.Series(["EQ"]*len(day)))) == "EQ"].copy()
+                day["DATE"]    = current.date()
+                day["SC_CODE"] = day.get("SYMBOL", day.get("Symbol", ""))
+                day["Open"]    = pd.to_numeric(day.get("OPEN",  day.get("Open",  0)), errors="coerce")
+                day["High"]    = pd.to_numeric(day.get("HIGH",  day.get("High",  0)), errors="coerce")
+                day["Low"]     = pd.to_numeric(day.get("LOW",   day.get("Low",   0)), errors="coerce")
+                day["Close"]   = pd.to_numeric(day.get("CLOSE", day.get("Close", 0)), errors="coerce")
+                day["Volume"]  = pd.to_numeric(
+                    day.get("TOTTRDQTY", day.get("TotTrdQty", day.get("Volume", 0))),
+                    errors="coerce",
+                ).fillna(0)
+                day["SC_NAME"] = day["SC_CODE"]
+                frames.append(day[["SC_CODE", "SC_NAME", "DATE", "Open", "High", "Low", "Close", "Volume"]])
+            except Exception:
+                pass   # holiday or error — skip day
+
+            current += pd.Timedelta(days=1)
+
+        if not frames:
+            raise RuntimeError("No NSE BhavCopy files could be downloaded")
+
+        return pd.concat(frames, ignore_index=True)
+
+    # ------------------------------------------------------------------
+    def _fetch_yfinance(self, trade_date: str) -> Optional[pd.DataFrame]:
+        """
+        Fallback 2: yfinance for the top Nifty 500 stocks.
+        Uses NSE symbol suffixes (.NS); maps back to numeric SC_CODE proxies.
+        """
+        import yfinance as yf
+
+        # Representative Nifty 100 symbols (reduces download time)
+        NIFTY100_NS = [
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+            "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
+            "LT.NS", "AXISBANK.NS", "BAJFINANCE.NS", "ASIANPAINT.NS", "MARUTI.NS",
+            "SUNPHARMA.NS", "TITAN.NS", "ULTRACEMCO.NS", "WIPRO.NS", "ONGC.NS",
+            "NESTLEIND.NS", "POWERGRID.NS", "NTPC.NS", "M&M.NS", "TECHM.NS",
+            "HCLTECH.NS", "TATAMOTORS.NS", "COALINDIA.NS", "DIVISLAB.NS", "BAJAJFINSV.NS",
+            "ADANIPORTS.NS", "DRREDDY.NS", "EICHERMOT.NS", "CIPLA.NS", "HEROMOTOCO.NS",
+            "GRASIM.NS", "SHREECEM.NS", "BPCL.NS", "BRITANNIA.NS", "INDUSINDBK.NS",
+            "TATACONSUM.NS", "HDFCLIFE.NS", "SBILIFE.NS", "UPL.NS", "ADANIENT.NS",
+            "PIDILITIND.NS", "AMBUJACEM.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS", "HAVELLS.NS",
+        ]
+
+        end   = pd.to_datetime(trade_date)
+        start = end - pd.Timedelta(days=self.lookback_days + 30)
+
+        frames = []
+        for sym in NIFTY100_NS:
+            try:
+                tk = yf.Ticker(sym)
+                hist = tk.history(start=start.strftime("%Y-%m-%d"),
+                                  end=(end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                                  auto_adjust=False)
+                if hist.empty:
+                    continue
+                hist = hist.reset_index()
+                hist["SC_CODE"] = sym.replace(".NS", "")
+                hist["SC_NAME"] = sym.replace(".NS", "")
+                hist["DATE"]    = pd.to_datetime(hist["Date"]).dt.date
+                hist["Open"]    = hist["Open"]
+                hist["High"]    = hist["High"]
+                hist["Low"]     = hist["Low"]
+                hist["Close"]   = hist["Close"]
+                hist["Volume"]  = hist["Volume"]
+                frames.append(hist[["SC_CODE", "SC_NAME", "DATE",
+                                    "Open", "High", "Low", "Close", "Volume"]])
+            except Exception:
+                continue
+
+        if not frames:
+            raise RuntimeError("yfinance returned no data")
+
+        df = pd.concat(frames, ignore_index=True)
+        df["DATE"] = pd.to_datetime(df["DATE"])
+        return df
+
+
+# ---------------------------------------------------------------------------
 # Convenience factory
 # ---------------------------------------------------------------------------
 

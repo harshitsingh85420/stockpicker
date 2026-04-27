@@ -891,6 +891,94 @@ def calibrate_predictions(
     return out
 
 
+def calibration_curve_report(
+    y_true: Any,
+    y_prob_raw: Any,
+    y_prob_cal: Optional[Any] = None,
+    n_bins: int = 10,
+    chart_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    P16 -- Full calibration curve diagnostic.
+
+    Computes binned calibration statistics (ECE, Brier score, log-loss) and
+    optionally saves a reliability diagram.  Intended to be called after
+    training to audit probability quality.
+
+    Parameters
+    ----------
+    y_true      : Binary labels (0 / 1).
+    y_prob_raw  : Raw model probabilities (before calibration).
+    y_prob_cal  : Calibrated probabilities (optional; if None, only raw is assessed).
+    n_bins      : Number of equal-width probability bins (default 10).
+    chart_path  : Path to save reliability diagram PNG (optional).
+
+    Returns
+    -------
+    dict with keys:
+        raw_ece, raw_brier, raw_logloss,
+        cal_ece, cal_brier, cal_logloss (if y_prob_cal provided),
+        bucket_table_raw (pd.DataFrame),
+        bucket_table_cal (pd.DataFrame, only if y_prob_cal provided),
+        chart_saved (bool)
+    """
+    bv = BucketValidator(n_bins=n_bins)
+    y_t, y_pr = _validate_arrays(y_true, y_prob_raw)
+
+    bucket_raw   = bv.validate(y_t, y_pr)
+    non_empty    = bucket_raw[bucket_raw["n_samples"] > 0]
+    raw_ece      = float(
+        (non_empty["calibration_error"] * non_empty["n_samples"]).sum()
+        / non_empty["n_samples"].sum()
+    ) if not non_empty.empty else float("nan")
+    raw_brier    = bv.compute_brier_score(y_t, y_pr)
+    raw_logloss  = bv.compute_log_loss(y_t, y_pr)
+
+    result: Dict[str, Any] = {
+        "raw_ece":          round(raw_ece, 6),
+        "raw_brier":        round(raw_brier, 6),
+        "raw_logloss":      round(raw_logloss, 6),
+        "bucket_table_raw": bucket_raw,
+        "chart_saved":      False,
+    }
+
+    if y_prob_cal is not None:
+        _, y_pc = _validate_arrays(y_true, y_prob_cal)
+        bucket_cal  = bv.validate(y_t, y_pc)
+        ne_cal      = bucket_cal[bucket_cal["n_samples"] > 0]
+        cal_ece     = float(
+            (ne_cal["calibration_error"] * ne_cal["n_samples"]).sum()
+            / ne_cal["n_samples"].sum()
+        ) if not ne_cal.empty else float("nan")
+        cal_brier   = bv.compute_brier_score(y_t, y_pc)
+        cal_logloss = bv.compute_log_loss(y_t, y_pc)
+
+        result.update({
+            "cal_ece":          round(cal_ece, 6),
+            "cal_brier":        round(cal_brier, 6),
+            "cal_logloss":      round(cal_logloss, 6),
+            "bucket_table_cal": bucket_cal,
+            "ece_improvement":  round(raw_ece - cal_ece, 6),
+        })
+
+        # Save reliability diagram
+        if chart_path:
+            try:
+                dummy_cal = ProbabilityCalibrator(method=CalibrationMethod.NONE)
+                dummy_cal.plot_reliability_diagram(y_t, y_pr, y_pc, save_path=chart_path)
+                result["chart_saved"] = True
+                logger.info("P16: Calibration curve saved to %s", chart_path)
+            except Exception as exc:
+                logger.debug("P16: Chart save failed: %s", exc)
+
+    logger.info(
+        "P16 calibration_curve_report: raw_ece=%.4f  raw_brier=%.4f%s",
+        raw_ece, raw_brier,
+        f"  cal_ece={result.get('cal_ece', 'N/A'):.4f}" if "cal_ece" in result else "",
+    )
+    return result
+
+
 # ===========================================================================
 # Smoke test
 # ===========================================================================

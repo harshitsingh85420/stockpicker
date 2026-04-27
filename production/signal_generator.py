@@ -46,6 +46,8 @@ BASE_FEATURE_COLS = [
     "RET21D", "RET63D", "RS_Composite",
     "RSI14", "ADX14", "+DI14", "-DI14", "ADX14_chg3",
     "W_BBWidth", "W_TrendOK", "W_BBWidthPctl",
+    # P14: fractional differentiation features
+    "FracDiff_Close", "FracDiff_LogClose",
 ]
 
 # Label column produced by add_forward_returns()
@@ -82,10 +84,12 @@ class SignalGenerator:
         self.model_path       = self.models_dir / "lgbm_model.txt"
         self.feature_path     = self.models_dir / "feature_names.json"
         self.calibrator_path  = self.models_dir / "calibrator.pkl"
+        self.xgb_model_path   = self.models_dir / "xgb_model.pkl"
 
         self._model           = None
         self._feature_cols    = None
         self._calibrator      = None
+        self._xgb_model       = None   # P12: XGBoost ensemble member
 
     # ====================================================================
     # Public API
@@ -97,6 +101,7 @@ class SignalGenerator:
         threshold: float = 0.62,
         calibrate: bool = True,
         regime_threshold_override: float = None,
+        apply_meta_filter: bool = True,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Main entry point: compute features, predict, return picks.
@@ -106,12 +111,16 @@ class SignalGenerator:
             threshold:                Minimum calibrated probability to include.
             calibrate:                Apply saved calibrator if available.
             regime_threshold_override: Override threshold (e.g. from RegimeFilter).
+            apply_meta_filter:        Apply P13 meta-labeling filter if model exists.
 
         Returns:
             (picks_df, feature_df)
-            picks_df   — sorted by probability desc, with all signal columns.
-            feature_df — full feature DataFrame for SHAP / drift monitoring.
+            picks_df   -- sorted by probability desc, with all signal columns.
+            feature_df -- full feature DataFrame for SHAP / drift monitoring.
         """
+        # P31: temporary safeguard while pick-count explosion root cause is investigated
+        MAX_DAILY_PICKS = 20
+
         effective_threshold = regime_threshold_override if regime_threshold_override else threshold
 
         # -- 1. Feature engineering -------------------------------------
@@ -137,11 +146,47 @@ class SignalGenerator:
         if calibrate:
             raw_picks = self._apply_calibration(raw_picks)
 
+        # -- P31: daily pick diagnostics (pre-threshold) ----------------
+        universe_size = len(raw_picks)
+        n_above = (raw_picks["Probability"] >= effective_threshold).sum()
+        mean_score   = float(raw_picks["Probability"].mean())
+        median_score = float(raw_picks["Probability"].median())
+        pct_above    = n_above / universe_size if universe_size > 0 else 0.0
+        logger.info(
+            "P31 pick diagnostics: universe=%d  above_thresh=%d (%.1f%%)  "
+            "mean_prob=%.4f  median_prob=%.4f  threshold=%.4f",
+            universe_size, n_above, pct_above * 100,
+            mean_score, median_score, effective_threshold,
+        )
+
         # -- 5. Apply threshold -----------------------------------------
         picks = raw_picks[raw_picks["Probability"] >= effective_threshold].copy()
         picks = picks.sort_values("Probability", ascending=False).reset_index(drop=True)
-        picks["Rank"] = range(1, len(picks) + 1)
         picks["Signal_Threshold"] = round(effective_threshold, 4)
+
+        # -- 6. Meta-labeling filter (P13) ------------------------------
+        if apply_meta_filter and not picks.empty:
+            try:
+                from production.meta_labeler import MetaLabeler
+                meta = MetaLabeler()
+                picks, _ = meta.filter_picks(picks, primary_prob_col="Probability_Raw")
+            except Exception as exc:
+                logger.debug("P13 meta-filter skipped: %s", exc)
+
+        picks = picks.sort_values("Probability", ascending=False).reset_index(drop=True)
+
+        # -- P31: enforce MAX_DAILY_PICKS cap ---------------------------
+        # Root cause: P31 pick explosion investigation — cap is a temporary safeguard.
+        # Remove once score-distribution drift is fully diagnosed and fixed.
+        if len(picks) > MAX_DAILY_PICKS:
+            logger.warning(
+                "P31 MAX_DAILY_PICKS cap: %d picks -> %d (top by probability). "
+                "Root cause of explosion under investigation.",
+                len(picks), MAX_DAILY_PICKS,
+            )
+            picks = picks.head(MAX_DAILY_PICKS)
+
+        picks["Rank"] = range(1, len(picks) + 1)
 
         logger.info(
             "SignalGenerator: %d picks above threshold %.2f (from %d candidates).",
@@ -331,6 +376,18 @@ class SignalGenerator:
                 logger.error("Model predict failed: %s", e)
                 return pd.DataFrame()
 
+        # P12: XGBoost ensemble — average with LightGBM if available
+        xgb_model = self._load_xgb_model()
+        if xgb_model is not None:
+            try:
+                import xgboost as xgb
+                dmat = xgb.DMatrix(X.values)
+                xgb_probs = xgb_model.predict(dmat)
+                probs = 0.5 * probs + 0.5 * xgb_probs
+                logger.info("P12: LightGBM + XGBoost ensemble applied.")
+            except Exception as exc:
+                logger.debug("P12: XGBoost ensemble skipped: %s", exc)
+
         today_df = today_df.copy()
         today_df["Probability_Raw"] = probs
         today_df["Probability"]     = probs   # overwritten by calibration
@@ -451,6 +508,23 @@ class SignalGenerator:
                 logger.debug("Calibrator load failed: %s", e)
         return self._calibrator
 
+    def _load_xgb_model(self):
+        """P12: Load XGBoost ensemble member from disk (returns None if absent)."""
+        if self._xgb_model is not None:
+            return self._xgb_model
+        if not self.xgb_model_path.exists():
+            return None
+        try:
+            import pickle
+            import xgboost  # noqa: F401  -- verify it is installed
+            with open(self.xgb_model_path, "rb") as fh:
+                self._xgb_model = pickle.load(fh)
+            logger.info("P12: XGBoost model loaded from %s.", self.xgb_model_path)
+            return self._xgb_model
+        except Exception as exc:
+            logger.debug("P12: XGBoost model load skipped: %s", exc)
+            return None
+
     def _save_model(self, model, feat_cols: list):
         """Persist model and feature list to disk."""
         try:
@@ -460,6 +534,94 @@ class SignalGenerator:
             logger.info("Model saved -> %s", self.model_path)
         except Exception as e:
             logger.error("Model save failed: %s", e)
+
+    def compute_shap_attributions(
+        self,
+        picks_df: pd.DataFrame,
+        feature_df: pd.DataFrame,
+        top_n: int = 3,
+    ) -> pd.DataFrame:
+        """
+        P15 -- Compute TreeSHAP values for each pick and attach top-N features.
+
+        Adds columns to picks_df:
+          SHAP_top1_feature, SHAP_top1_value
+          SHAP_top2_feature, SHAP_top2_value
+          SHAP_top3_feature, SHAP_top3_value
+
+        Falls back silently if shap is not installed or the model is not loaded.
+
+        Parameters
+        ----------
+        picks_df   : Output of generate() -- rows are individual picks.
+        feature_df : Full feature DataFrame from generate() -- used to get
+                     feature values for the picks (matched on SC_CODE + DATE).
+        top_n      : How many top SHAP features to attach (default 3).
+
+        Returns
+        -------
+        picks_df with SHAP columns added (original if shap unavailable).
+        """
+        try:
+            import shap
+        except ImportError:
+            logger.debug("P15: shap not installed -- skipping SHAP attribution.")
+            return picks_df
+
+        model = self._ensure_model(None)
+        if model is None or self._feature_cols is None:
+            return picks_df
+
+        feat_cols = self._feature_cols
+        try:
+            # Match picks to their feature rows
+            feature_df = feature_df.copy()
+            feature_df["DATE"] = pd.to_datetime(feature_df["DATE"])
+            picks_copy = picks_df.copy()
+
+            if "Prediction_Date" in picks_copy.columns:
+                pred_date = pd.to_datetime(picks_copy["Prediction_Date"].iloc[0])
+                feat_rows = feature_df[feature_df["DATE"] == pred_date]
+            else:
+                feat_rows = feature_df[feature_df["DATE"] == feature_df["DATE"].max()]
+
+            feat_rows = feat_rows.set_index("SC_CODE")
+            X_picks = (
+                picks_copy["SC_CODE"]
+                .map(lambda sc: feat_rows.loc[sc] if sc in feat_rows.index else None)
+            )
+            # Build matrix in feature_cols order
+            X_mat = pd.DataFrame(
+                [feat_rows.loc[sc][feat_cols].fillna(0).values
+                 if sc in feat_rows.index else np.zeros(len(feat_cols))
+                 for sc in picks_copy["SC_CODE"]],
+                columns=feat_cols,
+            )
+
+            explainer  = shap.TreeExplainer(model)
+            shap_vals  = explainer.shap_values(X_mat)   # shape (n_picks, n_features)
+
+            # For each pick, record top-N features by |SHAP|
+            for rank in range(1, top_n + 1):
+                picks_copy[f"SHAP_top{rank}_feature"] = ""
+                picks_copy[f"SHAP_top{rank}_value"]   = np.nan
+
+            for i, (_, row) in enumerate(picks_copy.iterrows()):
+                sv = shap_vals[i]
+                top_idx = np.argsort(np.abs(sv))[::-1][:top_n]
+                for rank, idx in enumerate(top_idx, 1):
+                    picks_copy.at[row.name, f"SHAP_top{rank}_feature"] = feat_cols[idx]
+                    picks_copy.at[row.name, f"SHAP_top{rank}_value"]   = round(float(sv[idx]), 6)
+
+            logger.info(
+                "P15: SHAP attributions computed for %d picks (%d features).",
+                len(picks_copy), len(feat_cols),
+            )
+            return picks_copy
+
+        except Exception as exc:
+            logger.debug("P15: SHAP computation failed: %s", exc)
+            return picks_df
 
     def _save_reference_distribution(self, X: pd.DataFrame, preds: np.ndarray):
         """Save reference feature distribution for drift monitoring."""

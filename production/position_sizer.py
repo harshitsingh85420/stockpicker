@@ -482,6 +482,115 @@ class PositionSizer:
 
 
 # ---------------------------------------------------------------------------
+# P19 -- ATR-based position sizing with half-Kelly criterion
+# ---------------------------------------------------------------------------
+
+def kelly_fraction(
+    win_prob: float,
+    avg_win:  float,
+    avg_loss: float,
+    half_kelly: bool = True,
+) -> float:
+    """
+    Compute (optionally halved) Kelly criterion fraction.
+
+    Kelly formula:  f* = (b*p - q) / b
+      b = avg_win / avg_loss  (win/loss ratio)
+      p = win probability
+      q = 1 - p
+
+    Parameters
+    ----------
+    win_prob   : Estimated probability of a winning trade (e.g. from model).
+    avg_win    : Average win size as a fraction (e.g. 0.05 = 5%).
+    avg_loss   : Average loss size as a fraction (e.g. 0.02 = 2%).
+    half_kelly : Use half-Kelly to reduce volatility (default True).
+
+    Returns
+    -------
+    float in [0, 1] -- fraction of capital to allocate.
+    """
+    if avg_loss <= 0 or avg_win <= 0 or not (0 < win_prob < 1):
+        return 0.0
+    b = avg_win / avg_loss
+    q = 1.0 - win_prob
+    f = (b * win_prob - q) / b
+    f = max(0.0, f)   # Kelly can be negative -- floor at 0 (no trade)
+    if half_kelly:
+        f *= 0.5
+    return round(min(f, 1.0), 6)
+
+
+def atr_kelly_shares(
+    capital:      float,
+    entry:        float,
+    atr:          float,
+    win_prob:     float,
+    avg_win_atr:  float = 2.0,
+    avg_loss_atr: float = 1.0,
+    atr_stop_mult: float = 1.0,
+    max_position_pct: float = 0.10,
+    half_kelly:   bool = True,
+) -> Dict:
+    """
+    P19 -- Combine ATR stop-sizing with half-Kelly position sizing.
+
+    Step 1: Set stop-loss at entry - atr_stop_mult * ATR.
+    Step 2: Compute Kelly fraction from win_prob and ATR-derived R-multiple.
+    Step 3: Translate Kelly capital fraction into share count.
+    Step 4: Apply max_position_pct cap.
+
+    Parameters
+    ----------
+    capital        : Available capital in INR.
+    entry          : Entry price per share.
+    atr            : 14-day ATR of the stock.
+    win_prob       : Model-predicted win probability for this trade.
+    avg_win_atr    : Typical profit as ATR multiples (default 2.0).
+    avg_loss_atr   : Typical loss as ATR multiples (default 1.0).
+    atr_stop_mult  : ATR multiple for stop (default 1.0 ATR below entry).
+    max_position_pct: Cap on fraction of capital per position (default 10%).
+    half_kelly     : Use half-Kelly (default True -- industry standard for live trading).
+
+    Returns
+    -------
+    dict with keys:
+        shares, stop_price, kelly_fraction, position_value,
+        position_pct, risk_per_share, total_risk
+    """
+    if entry <= 0 or atr <= 0 or capital <= 0:
+        return {"shares": 0, "stop_price": 0.0, "kelly_fraction": 0.0,
+                "position_value": 0.0, "position_pct": 0.0,
+                "risk_per_share": 0.0, "total_risk": 0.0}
+
+    stop_price = max(0.01, entry - atr_stop_mult * atr)
+    risk_per_share = entry - stop_price
+
+    # Express win/loss as fraction of entry price
+    avg_win_pct  = avg_win_atr  * atr / entry
+    avg_loss_pct = avg_loss_atr * atr / entry
+
+    kf = kelly_fraction(win_prob, avg_win_pct, avg_loss_pct, half_kelly=half_kelly)
+
+    # Capital fraction * total capital = position value
+    max_val   = capital * max_position_pct
+    kelly_val = capital * kf
+    pos_val   = min(kelly_val, max_val)
+    shares    = max(0, math.floor(pos_val / entry))
+    actual_val = shares * entry
+
+    return {
+        "shares":          shares,
+        "stop_price":      round(stop_price, 2),
+        "kelly_fraction":  kf,
+        "position_value":  round(actual_val, 2),
+        "position_pct":    round(actual_val / capital, 6) if capital > 0 else 0.0,
+        "risk_per_share":  round(risk_per_share, 2),
+        "total_risk":      round(shares * risk_per_share, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Self-test / demo
 # ---------------------------------------------------------------------------
 

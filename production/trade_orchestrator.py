@@ -160,6 +160,7 @@ class TradeOrchestrator:
         if self._kill_switch_active():
             logger.warning("Kill switch ACTIVE — no trades today.")
             self._audit("SYSTEM_STOP", reason="kill_switch")
+            self._write_daily_summary(result, ref_date)
             return result
 
         # -- PRE-CHECK: Circuit breaker --------------------------------
@@ -168,6 +169,7 @@ class TradeOrchestrator:
         if cb_state == "HALTED":
             logger.error("Circuit breaker HALTED — no new trades.")
             self._audit("RISK_CHECK", circuit_breaker="HALTED")
+            self._write_daily_summary(result, ref_date)
             return result
         if cb_state == "WARNING":
             logger.warning("Circuit breaker WARNING — positions halved.")
@@ -178,6 +180,7 @@ class TradeOrchestrator:
         bhav_df = self._l1_data(bhav_df, ref_date)
         if bhav_df is None:
             logger.error("L1: No data — SKIP_DAY.")
+            self._write_daily_summary(result, ref_date)
             return result
 
         # -- L2: Universe Filter ---------------------------------------
@@ -185,6 +188,7 @@ class TradeOrchestrator:
         bhav_df, tradable_codes = self._l2_universe(bhav_df, ref_date)
         if not tradable_codes:
             logger.error("L2: Zero tradable stocks — SKIP_DAY.")
+            self._write_daily_summary(result, ref_date)
             return result
         logger.info("L2: %d tradable stocks.", len(tradable_codes))
 
@@ -193,20 +197,22 @@ class TradeOrchestrator:
         regime, threshold = self._l3_regime(ref_date)
         result["regime"] = regime
         if not regime.get("is_tradeable", True):
-            logger.warning("L3: BEAR regime — SKIP_DAY.")
+            logger.warning("L3: BEAR/SKIP_DAY regime — SKIP_DAY.")
             result["action"] = "SKIP_DAY"
+            self._write_daily_summary(result, ref_date)
             return result
         logger.info("L3: regime=%s  threshold=%.2f", regime.get("regime"), threshold)
 
         # -- L4+L5: Signal Generation ----------------------------------
         logger.info("-- L4+L5  Feature Engineering & Signal Generation -------")
-        picks_df, feature_df, explanations = self._l45_signal(
+        picks_df, feature_df, explanations, shap_df = self._l45_signal(
             bhav_df, tradable_codes, ref_date, threshold
         )
         result["explanations"] = explanations
         if picks_df.empty:
             logger.info("L5: No picks above threshold %.2f.", threshold)
             result["action"] = "SKIP_DAY"
+            self._write_daily_summary(result, ref_date)
             return result
         logger.info("L5: %d raw picks.", len(picks_df))
 
@@ -215,6 +221,7 @@ class TradeOrchestrator:
         if picks_df.empty:
             logger.info("L3b: All picks in event blackout — SKIP_DAY.")
             result["action"] = "SKIP_DAY"
+            self._write_daily_summary(result, ref_date)
             return result
 
         # -- L6: Portfolio Construction --------------------------------
@@ -222,6 +229,7 @@ class TradeOrchestrator:
         picks_df = self._l6_portfolio(picks_df, bhav_df)
         if picks_df.empty:
             result["action"] = "SKIP_DAY"
+            self._write_daily_summary(result, ref_date)
             return result
         logger.info("L6: %d picks after portfolio filters.", len(picks_df))
 
@@ -230,7 +238,7 @@ class TradeOrchestrator:
         picks_df = self._l7_execution(picks_df, bhav_df, size_mult, regime)
 
         # -- L8: Annotate & validate -----------------------------------
-        picks_df = self._annotate(picks_df, regime, ref_date, explanations)
+        picks_df = self._annotate(picks_df, regime, ref_date, explanations, shap_df)
 
         # -- L9: Compliance & audit ------------------------------------
         logger.info("-- L9  Compliance & Audit ------------------------------")
@@ -245,6 +253,7 @@ class TradeOrchestrator:
         logger.info(_sep)
         logger.info("  DONE  action=%s  picks=%d  csv=%s", final_action, len(picks_df), csv_path)
         logger.info(_sep)
+        self._write_daily_summary(result, ref_date)
         return result
 
     # ====================================================================
@@ -255,17 +264,22 @@ class TradeOrchestrator:
     def _l1_data(self, bhav_df, ref_date) -> Optional[pd.DataFrame]:
         """Fetch, standardise, health-check, corporate-action-adjust, QC."""
 
-        # 1. Fetch if not provided
+        # 1. Fetch if not provided — P06: multi-source failover
         if bhav_df is None:
             try:
-                from production.data_loader import DataLoader
-                loader = DataLoader(cache_dir=str(self.cfg.cache_dir / "bse"))
-                bhav_df = loader.load(
+                from production.operational_fallback import DataSourceFailover, AlertManager
+                failover = DataSourceFailover(
+                    cache_dir=str(self.cfg.cache_dir / "bse"),
                     lookback_days=self.cfg.lookback_days,
-                    reference_date=ref_date,
+                    alert_manager=AlertManager(alert_log=str(self.cfg.alert_log)),
                 )
+                bhav_df = failover.fetch_bhav(ref_date)
             except Exception as e:
-                logger.error("BhavCopy fetch failed: %s", e)
+                logger.error("L1: DataSourceFailover failed: %s", e)
+                bhav_df = None
+
+            if bhav_df is None:
+                logger.critical("L1: All data sources exhausted — SKIP_DAY.")
                 return None
         else:
             # Standardise if caller passed raw data
@@ -298,29 +312,37 @@ class TradeOrchestrator:
         except Exception as e:
             logger.debug("L1: Health checker skipped: %s", e)
 
-        # 3. Auto-fetch and apply corporate actions
+        # 3. Auto-fetch and apply corporate actions (P28: use BSE package)
         try:
             from production.corporate_actions_fetcher import CorporateActionsFetcher
             from production.data_integrity import CorporateActionAdjuster
 
-            ca_fetcher  = CorporateActionsFetcher()
-            ca_df = ca_fetcher.get(
-                start_date=(pd.to_datetime(ref_date) - pd.Timedelta(days=730)).strftime("%Y-%m-%d"),
-                end_date=ref_date,
-                action_types=["SPLIT", "BONUS"],
-            )
+            ca_fetcher = CorporateActionsFetcher()
+            sc_codes = bhav_df["SC_CODE"].unique().tolist() if bhav_df is not None else []
+
+            # P28: batch-fetch via bse Python package for the full universe
+            if sc_codes:
+                ca_df = ca_fetcher.fetch_for_universe(sc_codes, cache_date=ref_date)
+            else:
+                ca_df = ca_fetcher.get(
+                    start_date=(pd.to_datetime(ref_date) - pd.Timedelta(days=730)).strftime("%Y-%m-%d"),
+                    end_date=ref_date,
+                    action_types=["SPLIT", "BONUS"],
+                )
+
             if not ca_df.empty:
-                # Save to local CSV for CorporateActionAdjuster
                 corp_path = self.cfg.base_dir / "corporate_actions.csv"
                 ca_df.to_csv(corp_path, index=False)
                 adjuster = CorporateActionAdjuster()
                 adjuster.load_corporate_actions(str(corp_path))
                 bhav_df = adjuster.adjust_all(bhav_df)
-                logger.info("L1: Applied %d corporate actions.", len(ca_df))
+                logger.info("L1: %d corporate actions applied (source: %s).",
+                            len(ca_df),
+                            ca_df["SOURCE"].value_counts().to_dict() if "SOURCE" in ca_df.columns else "unknown")
             else:
-                logger.info("L1: No corporate actions to apply.")
+                logger.info("L1: No corporate actions found for this universe.")
         except Exception as e:
-            logger.debug("L1: Corporate action adjustment skipped: %s", e)
+            logger.warning("L1: Corporate action adjustment skipped: %s", e)
 
         # 4. QC
         try:
@@ -339,18 +361,38 @@ class TradeOrchestrator:
 
     # -- L2 ---------------------------------------------------------------
     def _l2_universe(self, bhav_df, ref_date):
-        """Apply liquidity / price / volume gate."""
+        """Apply liquidity / price / volume gate + P06 operator & IPO filters."""
         try:
-            from production.universe_filter import TradabilityGate
+            from production.universe_filter import (
+                TradabilityGate,
+                filter_operator_driven,
+                filter_recent_listings,
+            )
             gate = TradabilityGate(
                 min_value_crore=self.cfg.min_value_crore,
                 min_price=self.cfg.min_price,
                 min_avg_volume=self.cfg.min_avg_volume,
             )
             filtered = gate.apply(bhav_df, ref_date)
-            codes    = filtered["SC_CODE"].unique().tolist()
             report   = gate.get_filter_report(bhav_df, ref_date)
-            logger.info("L2: %s", {k: v for k, v in report.items() if "count" in k.lower() or "final" in k.lower()})
+            logger.info("L2: liquidity gate %s", {k: v for k, v in report.items() if "count" in k.lower() or "final" in k.lower()})
+
+            # P06 — operator / pump filter
+            n_before_op = filtered["SC_CODE"].nunique()
+            filtered = filter_operator_driven(filtered, lookback=10, max_circuits=2)
+            n_after_op = filtered["SC_CODE"].nunique()
+            if n_before_op != n_after_op:
+                logger.info("L2: operator filter removed %d pumped stocks.", n_before_op - n_after_op)
+
+            # P06 — post-IPO / insufficient-history filter
+            n_before_ipo = filtered["SC_CODE"].nunique()
+            filtered = filter_recent_listings(filtered, min_sessions=90)
+            n_after_ipo = filtered["SC_CODE"].nunique()
+            if n_before_ipo != n_after_ipo:
+                logger.info("L2: IPO filter removed %d recent listings.", n_before_ipo - n_after_ipo)
+
+            codes = filtered["SC_CODE"].unique().tolist()
+            logger.info("L2: %d tradable stocks after all L2 filters.", len(codes))
             return filtered, codes
         except Exception as e:
             logger.warning("L2: Universe filter failed (%s) — using all stocks.", e)
@@ -358,37 +400,62 @@ class TradeOrchestrator:
 
     # -- L3 ---------------------------------------------------------------
     def _l3_regime(self, ref_date):
-        """Nifty EMA regime + HMM. Returns (regime_dict, threshold)."""
+        """P32/P34/P38: Nifty EMA (3-layer) + 2-state HMM + VIX gate. Returns (regime_dict, threshold)."""
         try:
-            from production.regime_filter import IndexRegimeFilter, HMMRegimeDetector
-            ema = IndexRegimeFilter()
-            nifty = ema.fetch_nifty_data()
-            nifty = ema.compute_emas(nifty)
-            report = ema.get_regime_report(nifty)
-            regime = report.get("regime", "SIDEWAYS")
-            threshold = ema.get_probability_threshold(regime, self.cfg.base_threshold)
+            from production.regime_filter import get_combined_regime, IndiaVIXGate
+            ctx = get_combined_regime()
 
-            # HMM refinement
-            try:
-                close_col = "Close" if "Close" in nifty.columns else "close"
-                returns = nifty[close_col].pct_change().dropna()
-                if len(returns) >= 60:
-                    hmm = HMMRegimeDetector(n_states=4)
-                    hmm.fit(returns)
-                    pred = hmm.predict_current_regime(returns)
-                    params = hmm.get_regime_adjusted_params(pred["regime_label"])
-                    hmm_thr = params.get("probability_threshold", threshold)
-                    threshold = max(threshold, hmm_thr)
-                    report["hmm_regime"]     = pred["regime_label"]
-                    report["hmm_confidence"] = round(pred.get("confidence", 0), 4)
-                    report["size_multiplier"]= params.get("position_size_multiplier", 1.0)
-            except Exception as hmm_e:
-                logger.debug("HMM skipped: %s", hmm_e)
+            regime    = ctx.get("ema_regime", "SIDEWAYS")
+            hmm_label = ctx.get("hmm_regime", "UNKNOWN")
+            vix_level = ctx.get("vix_level")
+            vix_size  = ctx.get("vix_size_multiplier", 1.0) if "vix_size_multiplier" in ctx else (
+                ctx.get("position_size_multiplier", 1.0)
+            )
+            three_action = ctx.get("three_layer_action", "NORMAL")
 
-            report["recommended_threshold"] = round(threshold, 4)
+            # P38: mandatory VIX log line on every L3 run
+            action_str = "SKIP_DAY" if not ctx.get("is_tradeable", True) else three_action
+            logger.info(
+                "P38 India VIX = %s | action=%s | size_factor=%.2f",
+                f"{vix_level:.1f}" if vix_level is not None else "N/A",
+                action_str,
+                vix_size,
+            )
+
+            # P38: HMM-EMA conflict alert
+            if hmm_label not in ("UNKNOWN", regime.replace("BULL", "BULL_TRENDING").replace("BEAR", "BEAR_TRENDING")):
+                logger.warning(
+                    "P38 HMM-EMA CONFLICT ALERT: HMM=%s  EMA=%s  combined=%s",
+                    hmm_label, regime, ctx.get("combined_label", "?"),
+                )
+
+            threshold = ctx.get("recommended_threshold", self.cfg.base_threshold)
+            threshold = max(threshold, self.cfg.base_threshold)
+
+            report = {
+                "regime":               regime,
+                "combined_label":       ctx.get("combined_label", regime),
+                "hmm_regime":           hmm_label,
+                "hmm_confidence":       ctx.get("hmm_confidence", 0.0),
+                "hmm_converged":        ctx.get("hmm_converged", False),
+                "is_tradeable":         ctx.get("is_tradeable", True),
+                "recommended_threshold":round(threshold, 4),
+                "size_multiplier":      ctx.get("position_size_multiplier", 1.0),
+                "max_positions":        ctx.get("max_positions", self.cfg.max_positions),
+                "nifty_close":          ctx.get("nifty_close"),
+                "ema50":                ctx.get("ema50"),
+                "ema200":               ctx.get("ema200"),
+                "vix_level":            vix_level,
+                "vix_regime":           ctx.get("vix_regime", "UNKNOWN"),
+                "three_layer_action":   three_action,
+                "three_layer_swing":    ctx.get("three_layer_swing"),
+                "three_layer_medium":   ctx.get("three_layer_medium"),
+                "three_layer_long":     ctx.get("three_layer_long"),
+            }
             return report, threshold
         except Exception as e:
             logger.warning("L3: Regime filter failed (%s) — defaults.", e)
+            logger.info("P38 India VIX = N/A | action=UNKNOWN | size_factor=1.00")
             return {"regime": "UNKNOWN", "is_tradeable": True}, self.cfg.base_threshold
 
     # -- L4+L5 ------------------------------------------------------------
@@ -410,8 +477,9 @@ class TradeOrchestrator:
             logger.error("L5: SignalGenerator failed: %s", e)
             return pd.DataFrame(), pd.DataFrame(), []
 
-        # SHAP explanations (best-effort)
+        # P35: SHAP explanations — structured batch (best-effort)
         explanations = []
+        shap_df = pd.DataFrame()
         if not picks_df.empty:
             try:
                 from production.signal_generator import SignalGenerator as _SG
@@ -420,8 +488,8 @@ class TradeOrchestrator:
                 feat_cols = sg2._feature_cols or []
 
                 if model and feat_cols:
-                    from production.shap_explainability import SHAPExplainer, explain_picks
-                    explanations = explain_picks(
+                    from production.shap_explainability import explain_batch
+                    shap_df = explain_batch(
                         model=model,
                         feature_names=feat_cols,
                         picks_df=picks_df,
@@ -430,9 +498,13 @@ class TradeOrchestrator:
                         log_dir=str(self.cfg.shap_log_dir),
                         top_n=6,
                     )
-                    logger.info("L5: SHAP explanations logged for %d picks.", len(explanations))
+                    logger.info(
+                        "P35: SHAP batch complete — %d picks  dominated=%d",
+                        len(shap_df),
+                        int(shap_df["shap_dominated"].sum()) if not shap_df.empty else 0,
+                    )
             except Exception as e:
-                logger.debug("L5: SHAP skipped: %s", e)
+                logger.debug("P35: SHAP skipped: %s", e)
 
         # Model drift check (best-effort)
         try:
@@ -449,7 +521,7 @@ class TradeOrchestrator:
         except Exception as e:
             logger.debug("L5: Drift monitor skipped: %s", e)
 
-        return picks_df, feature_df, explanations
+        return picks_df, feature_df, explanations, shap_df
 
     # -- L3b --------------------------------------------------------------
     def _l3b_events(self, picks_df, ref_date):
@@ -585,6 +657,32 @@ class TradeOrchestrator:
         except Exception as e:
             logger.debug("L7: ADV cap skipped: %s", e)
 
+        # P09 — Execution reality checks (volume, circuit, gap, liquidity)
+        try:
+            from production.execution_checks import apply_execution_checks
+            _exec_ref_date = bhav_df["DATE"].max()  # latest date in BhavCopy
+            n_before = len(picks_df)
+            picks_df, ec_report = apply_execution_checks(
+                picks_df, bhav_df, _exec_ref_date,
+                max_adv_fraction=0.50,
+                circuit_pct=0.195,
+                max_gap_pct=0.04,
+                max_impact_fraction=0.01,
+            )
+            n_removed = n_before - len(picks_df)
+            if n_removed > 0:
+                logger.info(
+                    "L7: P09 execution checks removed %d picks "
+                    "(vol=%d, circuit=%d, gap=%d, liq=%d).",
+                    n_removed,
+                    ec_report.get("volume_rejected", 0),
+                    ec_report.get("circuit_rejected", 0),
+                    ec_report.get("gap_rejected", 0),
+                    ec_report.get("liquidity_rejected", 0),
+                )
+        except Exception as e:
+            logger.debug("L7: P09 execution checks skipped: %s", e)
+
         # Friction model
         try:
             from production.friction_model import FrictionModel
@@ -680,6 +778,37 @@ class TradeOrchestrator:
         except Exception:
             return "NORMAL", 1.0
 
+    def _write_daily_summary(self, result: dict, ref_date: str) -> None:
+        """
+        P38: Write daily_summary_YYYYMMDD.json on every run, including SKIP_DAY.
+        """
+        try:
+            date_str = ref_date.replace("-", "")
+            out_path = self.cfg.results_dir / f"daily_summary_{date_str}.json"
+            regime = result.get("regime", {})
+            picks  = result.get("picks", pd.DataFrame())
+            payload = {
+                "date":           ref_date,
+                "action":         result.get("action", "SKIP_DAY"),
+                "n_picks":        len(picks) if picks is not None else 0,
+                "circuit_state":  result.get("circuit_state", "UNKNOWN"),
+                "regime":         regime.get("regime") if isinstance(regime, dict) else str(regime),
+                "combined_label": regime.get("combined_label") if isinstance(regime, dict) else None,
+                "hmm_regime":     regime.get("hmm_regime") if isinstance(regime, dict) else None,
+                "hmm_converged":  regime.get("hmm_converged") if isinstance(regime, dict) else None,
+                "vix_level":      regime.get("vix_level") if isinstance(regime, dict) else None,
+                "vix_regime":     regime.get("vix_regime") if isinstance(regime, dict) else None,
+                "three_layer_action": regime.get("three_layer_action") if isinstance(regime, dict) else None,
+                "threshold":      regime.get("recommended_threshold") if isinstance(regime, dict) else None,
+                "output_csv":     result.get("output_csv"),
+                "generated_at":   datetime.now().isoformat(timespec="seconds"),
+            }
+            with open(out_path, "w") as fh:
+                json.dump(payload, fh, indent=2, default=str)
+            logger.info("P38 daily_summary written -> %s", out_path)
+        except Exception as exc:
+            logger.debug("P38 daily_summary write failed: %s", exc)
+
     def _audit(self, event_type, **kwargs):
         try:
             from production.compliance import AuditTrail
@@ -687,8 +816,8 @@ class TradeOrchestrator:
         except Exception:
             pass
 
-    def _annotate(self, picks_df, regime, ref_date, explanations) -> pd.DataFrame:
-        """Add Regime, Sector, Rationale columns for the output CSV."""
+    def _annotate(self, picks_df, regime, ref_date, explanations, shap_df=None) -> pd.DataFrame:
+        """Add Regime, Sector, Rationale, and P35 SHAP columns for the output CSV."""
         picks_df = picks_df.copy()
         picks_df["Regime"] = regime.get("regime", "UNKNOWN")
 
@@ -706,6 +835,21 @@ class TradeOrchestrator:
             picks_df["Rationale"] = picks_df["SC_CODE"].map(rationale_map).fillna("")
         else:
             picks_df["Rationale"] = ""
+
+        # P35: structured SHAP columns (top-3 features + dominated flag)
+        shap_cols = [
+            "shap_top1_feature", "shap_top1_value",
+            "shap_top2_feature", "shap_top2_value",
+            "shap_top3_feature", "shap_top3_value",
+            "shap_dominated",
+        ]
+        if shap_df is not None and not shap_df.empty:
+            picks_df = picks_df.set_index("SC_CODE").join(
+                shap_df[shap_cols], how="left"
+            ).reset_index()
+        else:
+            for col in shap_cols:
+                picks_df[col] = "" if "feature" in col else (False if col == "shap_dominated" else 0.0)
 
         picks_df["Prediction_Date"] = ref_date
         return picks_df

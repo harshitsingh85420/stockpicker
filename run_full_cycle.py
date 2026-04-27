@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-run_full_cycle.py — Single-command daily pipeline.
+run_full_cycle.py -- Single-command daily pipeline.
 
 Runs three sequential phases after market close:
 
     Phase 1 – Train / refresh the LightGBM model on all data up to today.
     Phase 2 – Walk-forward backtest over the past year:
-               For every trading day D in [today−1year … today−5sessions]:
+               For every trading day D in [today−1year ... today−5sessions]:
                  • generate picks (prob ≥ threshold) using features up to D
                  • record the actual 5-session forward return
                Saves day-wise CSV, month-wise CSV, detail CSV, and a 3-panel chart.
@@ -27,6 +27,7 @@ Dependencies (beyond the production/ package):
 """
 
 import argparse
+import json
 import logging
 import sys
 from datetime import date as _date
@@ -42,8 +43,19 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-RESULTS_DIR = _ROOT / "stock_picker_data" / "results"
+RESULTS_DIR  = _ROOT / "stock_picker_data" / "results"
+MODELS_DIR   = _ROOT / "stock_picker_data" / "models"
+FEAT_JSON    = MODELS_DIR / "feature_names.json"   # written by train_model.py
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_expected_cols() -> list:
+    """Return the exact feature list the model was trained on."""
+    if FEAT_JSON.exists():
+        return json.loads(FEAT_JSON.read_text())
+    # fallback: BASE_FEATURE_COLS from signal_generator
+    from production.signal_generator import BASE_FEATURE_COLS
+    return BASE_FEATURE_COLS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -57,13 +69,13 @@ logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
-# Phase 1 — Train
+# Phase 1 -- Train
 # ===========================================================================
 
 def phase_train(end_date_str: str, lookback_days: int, calibrate: bool) -> dict:
     """Retrain LightGBM with data up to end_date and return metrics dict."""
     from train_model import run_training
-    logger.info("Phase 1 ▶ Training model (data up to %s) …", end_date_str)
+    logger.info("Phase 1 > Training model (data up to %s) ...", end_date_str)
     metrics = run_training(
         lookback_days=lookback_days,
         end=end_date_str,
@@ -71,19 +83,19 @@ def phase_train(end_date_str: str, lookback_days: int, calibrate: bool) -> dict:
         apply_ca=True,
     )
     logger.info(
-        "Phase 1 ✓ Training complete — CV AUC=%.4f (%d features, %d samples)",
+        "Phase 1 OK Training complete -- CV AUC=%.4f (%d features, %d samples)",
         metrics["mean_auc"], metrics["feature_count"], metrics["n_training_samples"],
     )
     return metrics
 
 
 # ===========================================================================
-# Phase 2 — Backtest
+# Phase 2 -- Backtest
 # ===========================================================================
 
 def _forward_close_series(bhav_df: pd.DataFrame, from_date, n_sessions: int = 5) -> pd.Series:
     """
-    Return SC_CODE → close price exactly n_sessions trading days after from_date.
+    Return SC_CODE -> close price exactly n_sessions trading days after from_date.
     Uses only data already present in bhav_df (no extra fetch needed).
     """
     all_dates = sorted(bhav_df["DATE"].unique())
@@ -107,19 +119,48 @@ def _predict_for_date(
     No look-ahead: feature_df was computed from bhav up to the full history,
     but we only *select* rows where DATE == target_date for prediction.
     Indicators (EMAs, ATR, etc.) already use only past data by construction.
+
+    P01: Feature alignment is enforced -- only the exact columns the model was
+    trained on are passed to model.predict(), in the same order.
     """
     date_col = "DATE"
     rows = feature_df[pd.to_datetime(feature_df[date_col]).dt.date == target_date].copy()
     if rows.empty:
         return pd.DataFrame()
 
-    available = [c for c in feat_cols if c in rows.columns]
-    if not available:
-        return pd.DataFrame()
+    # ── P01 + P29: enforce feature alignment ────────────────────────────
+    expected_cols = _load_expected_cols()
+    # P29: log WF block col count to catch 33-vs-31 drift
+    logger.debug(
+        "P29 WF BLOCK COLS (%d): %s", len(expected_cols), sorted(expected_cols)
+    )
+    # Check BEFORE reindex so we can detect genuine pipeline regressions
+    missing = [c for c in expected_cols if c not in rows.columns]
+    extra   = [c for c in rows.columns   if c not in expected_cols
+               and c not in {"SC_CODE","SC_NAME","DATE","ISIN","Source",
+                              "Open","High","Low","Close","Volume","ValueTraded"}]
+    if missing:
+        logger.warning(
+            "P29 [%s]: %d canonical feature(s) missing from WF block: %s",
+            target_date, len(missing), missing,
+        )
+    if extra:
+        logger.debug(
+            "P01 [%s]: %d extra feature(s) computed (ignored): %s",
+            target_date, len(extra), extra[:10],
+        )
+    # P29: Hard subset — never use X.columns directly
+    X_slice = rows.reindex(columns=expected_cols, fill_value=0).fillna(0)
+    assert list(X_slice.columns) == expected_cols, (
+        f"P29: reindex produced wrong column order on {target_date}"
+    )
+    assert X_slice.shape[1] == len(expected_cols), (
+        f"P29: feature count mismatch in WF block: {X_slice.shape[1]} vs {len(expected_cols)}"
+    )
+    # ────────────────────────────────────────────────────────────────────
 
-    X = rows.reindex(columns=feat_cols, fill_value=0).fillna(0)
     try:
-        probs = model.predict(X.values)
+        probs = model.predict(X_slice.values)
     except Exception as e:
         logger.debug("Predict failed for %s: %s", target_date, e)
         return pd.DataFrame()
@@ -148,13 +189,13 @@ def phase_backtest(
     Returns:
         (detail_df, daily_df, monthly_df, yearly_dict)
     """
-    logger.info("Phase 2 ▶ Running backtest …")
+    logger.info("Phase 2 > Running backtest ...")
 
     all_dates = sorted(bhav_df["DATE"].unique())
     # Determine backtest window: [today − 1 year ... today − fwd_sessions]
     cutoff_end   = sorted([d for d in all_dates if d < today])
     if len(cutoff_end) < fwd_sessions:
-        logger.warning("Not enough historical dates for backtest — skipping.")
+        logger.warning("Not enough historical dates for backtest -- skipping.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
     # last valid prediction date = fwd_sessions trading days before today
     last_pred_date = cutoff_end[-fwd_sessions]
@@ -170,7 +211,7 @@ def phase_backtest(
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
     logger.info(
-        "Backtesting %d trading days (%s → %s) …",
+        "Backtesting %d trading days (%s -> %s) ...",
         len(backtest_dates), backtest_dates[0], backtest_dates[-1],
     )
 
@@ -198,14 +239,58 @@ def phase_backtest(
     detail_df["positive"]  = (detail_df["return_5d"] > 0).astype(int)
     detail_df["pred_date"] = pd.to_datetime(detail_df["pred_date"])
 
+    # ── P02: Wire transaction costs into every backtest trade ────────────
+    # Uses FrictionModel (equity_delivery, BSE) for statutory costs and
+    # SlippageModel for market-impact cost.
+    # Position value is estimated from Close price * assumed 500 shares
+    # (floored to Rs.10,000 min, capped at Rs.5,00,000 max -- retail range).
+    try:
+        from production.friction_model import FrictionModel, SlippageModel
+        _fm = FrictionModel(instrument_type="equity_delivery")
+
+        # Vectorised: compute statutory round-trip for a representative position.
+        # Position value = Close * 500 shares, clamped to [10k, 5L] INR.
+        pos_vals = np.clip(detail_df["Close"].values * 500, 10_000, 500_000)
+
+        # Statutory costs: brokerage(both legs) + STT(sell) + exchange(both) +
+        # stamp(buy) + SEBI(both) + GST.  We sample 5 quantile points and
+        # interpolate to avoid calling calculate_round_trip_cost N times.
+        sample_vals = np.quantile(pos_vals, [0.1, 0.3, 0.5, 0.7, 0.9])
+        sample_pcts = np.array([
+            _fm.calculate_round_trip_cost(v, exchange="BSE")["total_costs"]["total"] / v
+            for v in sample_vals
+        ])
+        # Linear interpolation over the sampled curve
+        statutory_pct = np.interp(pos_vals, sample_vals, sample_pcts)
+
+        # Slippage: 0.15% per leg (entry + exit) = 0.30% round-trip
+        # BSE mid-caps have wider spreads than NSE large-caps; 0.15% per leg is conservative
+        slippage_pct = 0.003   # 0.3% round-trip
+
+        detail_df["friction_pct"]  = statutory_pct + slippage_pct
+        detail_df["return_5d_net"] = detail_df["return_5d"] - detail_df["friction_pct"]
+        detail_df["positive_net"]  = (detail_df["return_5d_net"] > 0).astype(int)
+        logger.info(
+            "P02 friction applied -- avg per trade: %.3f%%",
+            detail_df["friction_pct"].mean() * 100,
+        )
+    except Exception as _e:
+        logger.warning("P02 friction model unavailable (%s) -- using gross returns.", _e)
+        detail_df["friction_pct"]  = 0.0
+        detail_df["return_5d_net"] = detail_df["return_5d"]
+        detail_df["positive_net"]  = detail_df["positive"]
+    # ─────────────────────────────────────────────────────────────────────
+
     # ── Day-wise ─────────────────────────────────────────────────────────
     daily_df = (
         detail_df.groupby("pred_date")
         .agg(
-            total_picks   = ("positive", "count"),
-            positive_picks= ("positive", "sum"),
-            win_rate      = ("positive", "mean"),
-            avg_return    = ("return_5d", "mean"),
+            total_picks    = ("positive",     "count"),
+            positive_picks = ("positive",     "sum"),
+            win_rate       = ("positive",     "mean"),
+            win_rate_net   = ("positive_net", "mean"),
+            avg_return     = ("return_5d",    "mean"),
+            avg_return_net = ("return_5d_net","mean"),
         )
         .reset_index()
     )
@@ -215,26 +300,38 @@ def phase_backtest(
     monthly_df = (
         detail_df.groupby("month")
         .agg(
-            total_picks   = ("positive", "count"),
-            positive_picks= ("positive", "sum"),
-            win_rate      = ("positive", "mean"),
-            avg_return    = ("return_5d", "mean"),
+            total_picks    = ("positive",     "count"),
+            positive_picks = ("positive",     "sum"),
+            win_rate       = ("positive",     "mean"),
+            win_rate_net   = ("positive_net", "mean"),
+            avg_return     = ("return_5d",    "mean"),
+            avg_return_net = ("return_5d_net","mean"),
         )
         .reset_index()
     )
 
     # ── Yearly summary ───────────────────────────────────────────────────
+    avg_friction = float(detail_df["friction_pct"].mean())
     yearly = {
-        "total_trading_days": len(daily_df),
-        "total_picks":        len(detail_df),
-        "overall_win_rate":   float(detail_df["positive"].mean()),
-        "avg_return":         float(detail_df["return_5d"].mean()),
-        "median_return":      float(detail_df["return_5d"].median()),
-        "backtest_start":     str(backtest_dates[0]),
-        "backtest_end":       str(backtest_dates[-1]),
+        "total_trading_days":  len(daily_df),
+        "total_picks":         len(detail_df),
+        "overall_win_rate":    float(detail_df["positive"].mean()),
+        "net_win_rate":        float(detail_df["positive_net"].mean()),
+        "avg_friction_pct":    avg_friction,
+        "avg_return":          float(detail_df["return_5d"].mean()),
+        "avg_return_net":      float(detail_df["return_5d_net"].mean()),
+        "median_return":       float(detail_df["return_5d"].median()),
+        "median_return_net":   float(detail_df["return_5d_net"].median()),
+        "backtest_start":      str(backtest_dates[0]),
+        "backtest_end":        str(backtest_dates[-1]),
     }
 
-    logger.info("Phase 2 ✓ Backtest done — win rate %.1f%%", yearly["overall_win_rate"] * 100)
+    logger.info(
+        "Phase 2 complete -- gross win rate %.1f%%  |  net win rate %.1f%%  |  avg friction %.3f%%",
+        yearly["overall_win_rate"] * 100,
+        yearly["net_win_rate"] * 100,
+        yearly["avg_friction_pct"] * 100,
+    )
     return detail_df, daily_df, monthly_df, yearly
 
 
@@ -250,15 +347,30 @@ def save_backtest_results(detail_df, daily_df, monthly_df, today_str: str):
 def print_backtest_summary(yearly: dict):
     if not yearly:
         return
-    w = 54
+    w = 62
+    gross_wr = yearly.get("overall_win_rate", 0)
+    net_wr   = yearly.get("net_win_rate", gross_wr)
+    friction = yearly.get("avg_friction_pct", 0)
+    avg_ret  = yearly.get("avg_return", 0)
+    avg_net  = yearly.get("avg_return_net", avg_ret)
+    med_ret  = yearly.get("median_return", 0)
+    med_net  = yearly.get("median_return_net", med_ret)
     print("\n" + "=" * w)
-    print(f"  BACKTEST SUMMARY ({yearly['backtest_start']} → {yearly['backtest_end']})")
+    print(f"  BACKTEST SUMMARY ({yearly['backtest_start']} -> {yearly['backtest_end']})")
     print("=" * w)
-    print(f"  Trading days tested  : {yearly['total_trading_days']}")
-    print(f"  Total picks made     : {yearly['total_picks']}")
-    print(f"  Overall win rate     : {yearly['overall_win_rate']:.1%}")
-    print(f"  Average 5-day return : {yearly['avg_return']:+.2%}")
-    print(f"  Median 5-day return  : {yearly['median_return']:+.2%}")
+    print(f"  Trading days tested         : {yearly['total_trading_days']}")
+    print(f"  Total picks made            : {yearly['total_picks']}")
+    print(f"  Gross win rate              : {gross_wr:.1%}")
+    print(f"  Net win rate (post-friction): {net_wr:.1%}")
+    print(f"  Avg friction per trade      : {friction:.3%}")
+    print(f"  Avg 5-day return (gross)    : {avg_ret:+.2%}")
+    print(f"  Avg 5-day return (net)      : {avg_net:+.2%}")
+    print(f"  Median 5-day return (gross) : {med_ret:+.2%}")
+    print(f"  Median 5-day return (net)   : {med_net:+.2%}")
+    print()
+    print(f"  Gross win rate: {gross_wr:.1%}  |  "
+          f"Net win rate (post-friction): {net_wr:.1%}  |  "
+          f"Avg friction per trade: {friction:.3%}")
     print("=" * w + "\n")
 
 
@@ -269,7 +381,7 @@ def plot_backtest(detail_df, daily_df, monthly_df, today_str: str):
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
     except ImportError:
-        logger.warning("matplotlib not installed — skipping charts.")
+        logger.warning("matplotlib not installed -- skipping charts.")
         return
 
     fig, axes = plt.subplots(3, 1, figsize=(13, 15))
@@ -324,16 +436,16 @@ def plot_backtest(detail_df, daily_df, monthly_df, today_str: str):
     plot_path = RESULTS_DIR / f"backtest_charts_{today_str}.png"
     plt.savefig(plot_path, dpi=120, bbox_inches="tight")
     plt.close()
-    logger.info("Charts saved → %s", plot_path)
+    logger.info("Charts saved -> %s", plot_path)
 
 
 # ===========================================================================
-# Phase 3 — Today's picks
+# Phase 3 -- Today's picks
 # ===========================================================================
 
 def phase_picks(today_str: str, total_capital: float) -> pd.DataFrame:
     """Run TradeOrchestrator for today and return the picks DataFrame."""
-    logger.info("Phase 3 ▶ Generating today's swing picks …")
+    logger.info("Phase 3 > Generating today's swing picks ...")
     from production.trade_orchestrator import TradeOrchestrator
     orch   = TradeOrchestrator()
     result = orch.run_daily(
@@ -344,7 +456,7 @@ def phase_picks(today_str: str, total_capital: float) -> pd.DataFrame:
     action = result.get("action", "unknown")
     regime = result.get("regime", "unknown")
     logger.info(
-        "Phase 3 ✓ %d picks generated  |  action=%s  regime=%s",
+        "Phase 3 OK %d picks generated  |  action=%s  regime=%s",
         len(picks), action, regime,
     )
     return picks
@@ -357,7 +469,7 @@ def print_picks_table(picks: pd.DataFrame, today_str: str):
 
     w = 72
     print("\n" + "=" * w)
-    print(f"  TODAY'S SWING PICKS  —  {today_str}")
+    print(f"  TODAY'S SWING PICKS  --  {today_str}")
     print("=" * w)
     print(f"  {'#':<4} {'SC_NAME':<16} {'CODE':<10} {'Close':>7} {'Prob':>6} {'Stop':>8} {'Sector'}")
     print("  " + "-" * (w - 2))
@@ -378,7 +490,7 @@ def print_picks_table(picks: pd.DataFrame, today_str: str):
 # ===========================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Full daily cycle: train → backtest → picks")
+    p = argparse.ArgumentParser(description="Full daily cycle: train -> backtest -> picks")
     p.add_argument("--date",           type=str,   default=str(_date.today()),
                    help="Reference date YYYY-MM-DD (default: today)")
     p.add_argument("--prob-threshold", type=float, default=0.62,
@@ -400,7 +512,7 @@ def main():
     today_str = str(today)
 
     logger.info("=" * 60)
-    logger.info("run_full_cycle.py  —  %s", today_str)
+    logger.info("run_full_cycle.py  --  %s", today_str)
     logger.info("=" * 60)
 
     # ── Phase 1: Train ──────────────────────────────────────────────────
@@ -415,66 +527,30 @@ def main():
             logger.error("Training failed: %s", e)
             logger.warning("Continuing with previously saved model (if any).")
     else:
-        logger.info("Phase 1 ▷ Skipped (--no-train).")
+        logger.info("Phase 1 > Skipped (--no-train).")
 
-    # ── Load data once for backtest (shared with feature computation) ───
+    # ── Phase 2 -- Walk-Forward Backtest (P07) ─────────────────────────
     if not args.no_backtest:
         try:
-            from production.data_loader import DataLoader
-            from production.signal_generator import SignalGenerator, BASE_FEATURE_COLS
-            import json
-
-            loader     = DataLoader()
-            # Load enough history: 1 year for backtest + indicator warmup (200+ days)
-            # So we load lookback_days (2 years) which covers both
-            bhav_df    = loader.load(lookback_days=args.lookback, end=today_str)
-
-            if bhav_df.empty:
-                logger.error("No BhavCopy data for backtest window.")
-            else:
-                # Load model
-                sg     = SignalGenerator()
-                model  = sg._ensure_model(None)
-                if model is None:
-                    raise RuntimeError("No trained model available for backtest.")
-
-                # Determine feature columns
-                feat_path = _ROOT / "stock_picker_data" / "models" / "feature_names.json"
-                if feat_path.exists():
-                    feat_cols = json.loads(feat_path.read_text())
-                else:
-                    feat_cols = BASE_FEATURE_COLS
-
-                # Compute features for all of history (once — fast via cache)
-                logger.info("Computing features for backtest window …")
-                feature_df = sg._compute_features(bhav_df)
-                if feature_df is None or feature_df.empty:
-                    raise RuntimeError("Feature computation returned empty DataFrame.")
-
-                # Restrict to available feature cols
-                feat_cols = [c for c in feat_cols if c in feature_df.columns]
-
-                detail_df, daily_df, monthly_df, yearly = phase_backtest(
-                    bhav_df=bhav_df,
-                    feature_df=feature_df,
-                    model=model,
-                    feat_cols=feat_cols,
-                    today=today,
-                    threshold=args.prob_threshold,
-                    fwd_sessions=5,
-                )
-
-                save_backtest_results(detail_df, daily_df, monthly_df, today_str)
-                print_backtest_summary(yearly)
-
-                if not args.no_charts and not detail_df.empty:
-                    plot_backtest(detail_df, daily_df, monthly_df, today_str)
-
+            from walk_forward_backtest import run_walk_forward, print_walk_forward_summary
+            logger.info("Phase 2 > Walk-forward backtest (P07: proper OOS) ...")
+            wf_result = run_walk_forward(
+                end_date=today_str,
+                lookback_days=args.lookback,
+                months_per_block=3,
+                embargo_sessions=5,
+                min_train_months=9,
+                threshold=args.prob_threshold,
+                draw_charts=not args.no_charts,
+            )
+            print_walk_forward_summary(wf_result["summary"], wf_result["block_stats"])
+            if wf_result.get("chart_path"):
+                logger.info("Phase 2 OK Walk-forward chart -> %s", wf_result["chart_path"])
         except Exception as e:
-            logger.error("Backtest failed: %s", e, exc_info=True)
+            logger.error("Walk-forward backtest failed: %s", e, exc_info=True)
             logger.warning("Continuing to Phase 3 (picks generation).")
     else:
-        logger.info("Phase 2 ▷ Skipped (--no-backtest).")
+        logger.info("Phase 2 > Skipped (--no-backtest).")
 
     # ── Phase 3: Today's picks ──────────────────────────────────────────
     try:
@@ -484,7 +560,7 @@ def main():
         logger.error("Picks generation failed: %s", e, exc_info=True)
         sys.exit(1)
 
-    logger.info("Full cycle complete  —  %s", today_str)
+    logger.info("Full cycle complete  --  %s", today_str)
 
 
 if __name__ == "__main__":

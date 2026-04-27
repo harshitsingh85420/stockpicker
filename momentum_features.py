@@ -360,6 +360,164 @@ def add_forward_returns(df: pd.DataFrame, periods: list = [5]) -> pd.DataFrame:
     return result
 
 
+def fracdiff_weights(d: float, size: int, threshold: float = 1e-5) -> np.ndarray:
+    """
+    Compute fractional differentiation weights for order d.
+    w_k = prod_{i=0}^{k-1} (d - i) / (i + 1), truncated when |w_k| < threshold.
+    """
+    w = [1.0]
+    for k in range(1, size):
+        w_k = -w[-1] * (d - k + 1) / k
+        if abs(w_k) < threshold:
+            break
+        w.append(w_k)
+    return np.array(w[::-1])   # oldest weight first
+
+
+def fracdiff_series(series: pd.Series, d: float, threshold: float = 1e-5) -> pd.Series:
+    """
+    Apply fractional differentiation of order d to a price series.
+    Leading rows where the full weight vector cannot be applied are NaN.
+    """
+    w = fracdiff_weights(d, len(series), threshold)
+    width = len(w)
+    vals = series.values.astype(float)
+    out = np.full(len(vals), np.nan)
+    for i in range(width - 1, len(vals)):
+        out[i] = np.dot(w, vals[i - width + 1: i + 1])
+    return pd.Series(out, index=series.index)
+
+
+def add_fracdiff_features(
+    df: pd.DataFrame,
+    d: float = 0.4,
+    threshold: float = 1e-5,
+) -> pd.DataFrame:
+    """
+    P14 -- Add fractionally differentiated close price as a feature.
+
+    Produces two columns:
+      FracDiff_Close    -- fracdiff of Close with order d
+      FracDiff_LogClose -- fracdiff of log(Close) with order d
+
+    These preserve maximum price memory while being approximately stationary,
+    unlike log-returns (d=1) which discard all level information.
+
+    Parameters
+    ----------
+    d : Fractional order (default 0.4 -- near-stationary for equity price
+        series while retaining ~60% of historical memory).
+    """
+    def _fracdiff_group(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("DATE").copy()
+        g["FracDiff_Close"]    = fracdiff_series(g["Close"], d=d, threshold=threshold)
+        log_close = np.log(g["Close"].replace(0, np.nan))
+        g["FracDiff_LogClose"] = fracdiff_series(log_close,  d=d, threshold=threshold)
+        return g
+
+    return df.groupby("SC_CODE", group_keys=False).apply(_fracdiff_group)
+
+
+def add_triple_barrier_labels(
+    df: pd.DataFrame,
+    max_sessions: int = 5,
+    profit_target_atr_mult: float = 2.0,
+    stop_loss_atr_mult: float = 1.0,
+    fixed_profit_pct: float = 0.03,
+    fixed_stop_pct: float = 0.02,
+    use_atr: bool = True,
+) -> pd.DataFrame:
+    """
+    P10 -- Triple-barrier labels replacing binary close-to-close label.
+
+    For each (stock, date) the label is determined by which event occurs
+    first within the next max_sessions trading sessions:
+
+      - Profit target hit first  -> Label_tb_positive = 1
+      - Stop-loss hit first      -> Label_tb_positive = 0
+      - Time barrier (neither)   -> Label_tb_positive = sign(final_return)
+
+    Barriers are set as ATR multiples when ATR14 is present, otherwise
+    fixed_profit_pct / fixed_stop_pct are used as fallbacks.
+
+    Adds columns:
+      Label_tb_positive  -- 0 or 1  (primary training label)
+      Label_tb_barrier   -- 'profit' | 'stop' | 'time'
+      Label_tb_pct       -- actual % return at barrier or time stop
+    """
+    def _apply_tb(g: pd.DataFrame) -> pd.DataFrame:
+        g = g.sort_values("DATE").reset_index(drop=True)
+        closes = g["Close"].values
+        n      = len(closes)
+
+        if use_atr and "ATR14" in g.columns:
+            atrs = g["ATR14"].fillna(0).values
+        else:
+            atrs = np.zeros(n)
+
+        labels       = np.full(n, np.nan)
+        barriers     = [""] * n
+        barrier_pcts = np.full(n, np.nan)
+
+        for i in range(n - 1):
+            entry = closes[i]
+            if entry <= 0:
+                labels[i]   = 0
+                barriers[i] = "time"
+                continue
+
+            atr = atrs[i] if atrs[i] > 0 else 0.0
+            if use_atr and atr > 0:
+                tp_pct = (profit_target_atr_mult * atr) / entry
+                sl_pct = (stop_loss_atr_mult     * atr) / entry
+            else:
+                tp_pct = fixed_profit_pct
+                sl_pct = fixed_stop_pct
+
+            profit_price = entry * (1.0 + tp_pct)
+            stop_price   = entry * (1.0 - sl_pct)
+
+            triggered = False
+            for j in range(i + 1, min(i + max_sessions + 1, n)):
+                c   = closes[j]
+                ret = (c / entry) - 1.0
+                if c >= profit_price:
+                    labels[i]       = 1
+                    barriers[i]     = "profit"
+                    barrier_pcts[i] = ret
+                    triggered       = True
+                    break
+                if c <= stop_price:
+                    labels[i]       = 0
+                    barriers[i]     = "stop"
+                    barrier_pcts[i] = ret
+                    triggered       = True
+                    break
+
+            if not triggered:
+                last_idx        = min(i + max_sessions, n - 1)
+                ret             = (closes[last_idx] / entry) - 1.0
+                labels[i]       = 1 if ret > 0 else 0
+                barriers[i]     = "time"
+                barrier_pcts[i] = ret
+
+        g["Label_tb_positive"] = labels
+        g["Label_tb_barrier"]  = barriers
+        g["Label_tb_pct"]      = barrier_pcts
+        return g
+
+    print(
+        f" Computing triple-barrier labels (max={max_sessions}s, "
+        f"TP={profit_target_atr_mult}xATR, SL={stop_loss_atr_mult}xATR) ..."
+    )
+    result = df.groupby("SC_CODE", group_keys=False).apply(_apply_tb)
+    n_profit = (result["Label_tb_barrier"] == "profit").sum()
+    n_stop   = (result["Label_tb_barrier"] == "stop").sum()
+    n_time   = (result["Label_tb_barrier"] == "time").sum()
+    print(f"* Triple-barrier labels: profit={n_profit}  stop={n_stop}  time={n_time}")
+    return result
+
+
 # Test
 if __name__ == "__main__":
     from bse_loader import BSEDataFetcher

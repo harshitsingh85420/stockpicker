@@ -96,6 +96,7 @@ class DataLoader:
         start: str = None,
         end: str = None,
         reference_date: str = None,
+        pit_filter: bool = False,
     ) -> pd.DataFrame:
         """
         Fetch BhavCopy for a date range and return in standard schema.
@@ -107,6 +108,8 @@ class DataLoader:
             start: 'YYYY-MM-DD' start date (overrides lookback_days).
             end:   'YYYY-MM-DD' end date (defaults to latest trading day).
             reference_date: Anchor for lookback (defaults to today).
+            pit_filter: If True, apply PointInTimeUniverse filter per date
+                        (survivorship-free, slower -- for backtesting only).
 
         Returns:
             Standardised DataFrame in production schema.
@@ -124,7 +127,7 @@ class DataLoader:
         else:
             start_dt = pd.to_datetime(start).date()
 
-        logger.info("Fetching BhavCopy %s -> %s …", start_dt, end_dt)
+        logger.info("Fetching BhavCopy %s -> %s ...", start_dt, end_dt)
         raw = fetcher.fetch_bhav_range(start_dt, end_dt)
 
         if raw is None or raw.empty:
@@ -132,12 +135,59 @@ class DataLoader:
             return pd.DataFrame(columns=list(SCHEMA.keys()))
 
         std = self.standardise(raw)
+
+        # ── P03: point-in-time universe filter ──────────────────────────
+        if pit_filter:
+            std = self._apply_pit_filter(std, end_dt)
+        # ────────────────────────────────────────────────────────────────
+
         logger.info(
             "DataLoader: %d rows, %d stocks, %s -> %s",
             len(std), std["SC_CODE"].nunique(),
             std["DATE"].min(), std["DATE"].max(),
         )
         return std
+
+    def _apply_pit_filter(self, df: pd.DataFrame, as_of_date) -> pd.DataFrame:
+        """
+        P03: Remove stocks that were not listed on each row's specific date.
+
+        For each unique date in df, keep only stocks valid on that date
+        according to PointInTimeUniverse.  This eliminates survivorship bias
+        in multi-date DataFrames used for backtesting.
+        """
+        try:
+            from production.universe_builder import PointInTimeUniverse
+            pit = PointInTimeUniverse()
+            master = pit.get_master()
+
+            # Vectorised check: for each row, is the stock valid on that date?
+            # Merge master on SC_CODE to get listed/delisted dates
+            df = df.merge(
+                master[["SC_CODE", "listed_date", "delisted_date"]],
+                on="SC_CODE", how="left",
+            )
+            # Stocks not in master are assumed active (give benefit of doubt)
+            df["listed_date"] = df["listed_date"].fillna(date(1990, 1, 1))
+
+            dates_col = df["DATE"]
+            valid = (
+                (df["listed_date"] <= dates_col)
+                & (
+                    df["delisted_date"].isna()
+                    | (df["delisted_date"] > dates_col)
+                )
+            )
+            before = len(df)
+            df = df[valid].drop(columns=["listed_date", "delisted_date"])
+            logger.info(
+                "P03 PIT filter: %d -> %d rows (removed %d delisted-stock rows)",
+                before, len(df), before - len(df),
+            )
+        except Exception as exc:
+            logger.warning("PIT filter failed (%s) -- returning unfiltered data.", exc)
+            df = df.drop(columns=["listed_date", "delisted_date"], errors="ignore")
+        return df
 
     # ------------------------------------------------------------------
     def standardise(self, raw: pd.DataFrame) -> pd.DataFrame:

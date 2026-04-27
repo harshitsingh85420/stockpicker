@@ -713,6 +713,137 @@ def _detect_date_column(df: pd.DataFrame) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# P20 -- End-to-end audit of all exit paths
+# ---------------------------------------------------------------------------
+
+def audit_exit_engine(
+    initial_stop_atr: float = 2.0,
+    trailing_stop_atr: float = 1.5,
+    trail_activation_pct: float = 0.03,
+    time_stop_sessions: int = 5,
+) -> dict:
+    """
+    P20 -- Run structured audit of DynamicExitEngine covering all exit paths.
+
+    Tests (each is independent):
+      1. HARD_STOP  : Price falls through initial stop on session 1.
+      2. TRAILING   : Price rises to activate trail, then retraces.
+      3. TIME_STOP  : Price never moves; time-stop fires after N sessions.
+      4. OPEN       : Price rises steadily -- position stays open.
+      5. PNL_SIGN   : Verifies P&L sign is correct for stopped-out vs profit.
+      6. STOP_RATCHET: Trailing stop only moves up, never down.
+
+    Returns
+    -------
+    dict with keys: passed (list), failed (list), all_passed (bool).
+    """
+    passed = []
+    failed = []
+
+    engine = DynamicExitEngine(
+        initial_stop_atr=initial_stop_atr,
+        trailing_stop_atr=trailing_stop_atr,
+        trail_activation_pct=trail_activation_pct,
+        time_stop_sessions=time_stop_sessions,
+    )
+    t0 = date(2025, 1, 2)
+
+    def _open(entry=100.0, atr=5.0, shares=10):
+        return engine.open_position("TEST", "TestCo", entry, t0, atr, shares)
+
+    def _tick(pos, price, atr=5.0, day_offset=1):
+        from datetime import timedelta
+        return engine.update_position(pos, price, t0 + timedelta(days=day_offset), atr)
+
+    # --- Test 1: HARD_STOP ---
+    try:
+        pos = _open(entry=100.0, atr=5.0)
+        stop = pos.stop_loss
+        _tick(pos, price=stop - 1.0, atr=5.0)   # price below stop
+        assert pos.status == "STOPPED_OUT", f"Expected STOPPED_OUT, got {pos.status}"
+        passed.append("HARD_STOP")
+    except Exception as e:
+        failed.append(f"HARD_STOP: {e}")
+
+    # --- Test 2: TRAILING_STOP ---
+    try:
+        pos = _open(entry=100.0, atr=5.0)
+        # Session 1: price rises to activate trail (gain > trail_activation_pct)
+        trigger_price = 100.0 * (1 + trail_activation_pct + 0.01)
+        _tick(pos, price=trigger_price, atr=5.0, day_offset=1)
+        assert pos.trailing_stop_activated, "Trailing stop not activated"
+        trail_high = pos.trailing_high
+        # Session 2: price retraces below trailing stop
+        retrace = trail_high - trailing_stop_atr * 5.0 - 0.5
+        _tick(pos, price=retrace, atr=5.0, day_offset=2)
+        assert pos.status == "STOPPED_OUT", f"Expected STOPPED_OUT, got {pos.status}"
+        passed.append("TRAILING_STOP")
+    except Exception as e:
+        failed.append(f"TRAILING_STOP: {e}")
+
+    # --- Test 3: TIME_STOP ---
+    try:
+        pos = _open(entry=100.0, atr=5.0)
+        # Run sessions at flat price (gain < 1%) until time_stop fires
+        for i in range(1, time_stop_sessions + 2):
+            if not pos.is_open:
+                break
+            _tick(pos, price=100.2, atr=5.0, day_offset=i)
+        assert pos.status == "TIME_STOP", f"Expected TIME_STOP, got {pos.status}"
+        passed.append("TIME_STOP")
+    except Exception as e:
+        failed.append(f"TIME_STOP: {e}")
+
+    # --- Test 4: STAYS_OPEN on rising price ---
+    try:
+        pos = _open(entry=100.0, atr=5.0)
+        prices = [101, 103, 106, 109]
+        for i, p in enumerate(prices, 1):
+            _tick(pos, price=float(p), atr=5.0, day_offset=i)
+        assert pos.is_open, f"Expected OPEN after rising prices, got {pos.status}"
+        passed.append("STAYS_OPEN")
+    except Exception as e:
+        failed.append(f"STAYS_OPEN: {e}")
+
+    # --- Test 5: PNL_SIGN ---
+    try:
+        pos = _open(entry=100.0, atr=5.0, shares=100)
+        exit_price = 110.0
+        pnl = engine.get_pnl(pos, exit_price)
+        assert pnl["gross_pnl"] > 0, f"Profitable exit should have positive PnL, got {pnl['gross_pnl']}"
+        pos2 = _open(entry=100.0, atr=5.0, shares=100)
+        pnl2 = engine.get_pnl(pos2, exit_price=90.0)
+        assert pnl2["gross_pnl"] < 0, f"Loss exit should have negative PnL, got {pnl2['gross_pnl']}"
+        passed.append("PNL_SIGN")
+    except Exception as e:
+        failed.append(f"PNL_SIGN: {e}")
+
+    # --- Test 6: STOP_RATCHET (trailing stop never moves down) ---
+    try:
+        pos = _open(entry=100.0, atr=5.0)
+        trigger = 100.0 * (1 + trail_activation_pct + 0.02)
+        _tick(pos, price=trigger, atr=5.0, day_offset=1)
+        stop_after_rise = pos.stop_loss
+
+        # Now price dips slightly (but not below stop)
+        dip = trigger - 1.0
+        _tick(pos, price=dip, atr=5.0, day_offset=2)
+        assert pos.stop_loss >= stop_after_rise - 1e-6, \
+            f"Stop moved down! {pos.stop_loss:.4f} < {stop_after_rise:.4f}"
+        passed.append("STOP_RATCHET")
+    except Exception as e:
+        failed.append(f"STOP_RATCHET: {e}")
+
+    return {
+        "passed":     passed,
+        "failed":     failed,
+        "all_passed": len(failed) == 0,
+        "n_passed":   len(passed),
+        "n_failed":   len(failed),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Self-test / demo
 # ---------------------------------------------------------------------------
 

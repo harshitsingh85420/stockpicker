@@ -325,6 +325,63 @@ def explain_picks(
     return explanations
 
 
+def explain_batch(
+    model,
+    feature_names: list,
+    picks_df: pd.DataFrame,
+    feature_df: pd.DataFrame,
+    date: str = None,
+    log_dir: str = "stock_picker_data/shap_logs",
+    top_n: int = 6,
+) -> pd.DataFrame:
+    """
+    P35: Return a structured DataFrame of SHAP columns for every pick.
+
+    Columns (indexed by SC_CODE):
+        shap_top1_feature, shap_top1_value,
+        shap_top2_feature, shap_top2_value,
+        shap_top3_feature, shap_top3_value,
+        shap_dominated   (bool — top feature SHAP > 3x second, concentration flag)
+
+    Falls back to empty strings / False when SHAP is unavailable.
+    """
+    empty_row = {
+        "shap_top1_feature": "", "shap_top1_value": 0.0,
+        "shap_top2_feature": "", "shap_top2_value": 0.0,
+        "shap_top3_feature": "", "shap_top3_value": 0.0,
+        "shap_dominated": False,
+    }
+    codes = picks_df["SC_CODE"].tolist() if "SC_CODE" in picks_df.columns else []
+    if not codes:
+        return pd.DataFrame()
+
+    exps = explain_picks(model, feature_names, picks_df, feature_df, date=date,
+                         log_dir=log_dir, top_n=top_n)
+
+    rows = []
+    exp_map = {e["sc_code"]: e for e in exps}
+    for code in codes:
+        exp = exp_map.get(code)
+        if exp is None:
+            rows.append({"SC_CODE": code, **empty_row})
+            continue
+        feats = exp.get("top_features", [])
+        row = {"SC_CODE": code}
+        for i in range(1, 4):
+            if i - 1 < len(feats):
+                row[f"shap_top{i}_feature"] = feats[i - 1]["feature"]
+                row[f"shap_top{i}_value"]   = feats[i - 1]["shap_value"]
+            else:
+                row[f"shap_top{i}_feature"] = ""
+                row[f"shap_top{i}_value"]   = 0.0
+        sv1 = abs(row["shap_top1_value"])
+        sv2 = abs(row["shap_top2_value"])
+        row["shap_dominated"] = bool(sv2 > 0 and sv1 > 3 * sv2)
+        rows.append(row)
+
+    return pd.DataFrame(rows).set_index("SC_CODE")
+
+
 def print_explanation(exp: dict):
     """Pretty-print a single stock explanation to stdout."""
     print(f"\n{'='*60}")

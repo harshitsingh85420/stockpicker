@@ -29,5 +29,7 @@
   "ADX14_chg3",
   "W_BBWidth",
   "W_TrendOK",
-  "W_BBWidthPctl"
+  "W_BBWidthPctl",
+  "FracDiff_Close",
+  "FracDiff_LogClose"
 ]

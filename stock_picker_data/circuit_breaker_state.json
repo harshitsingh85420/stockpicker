@@ -1,0 +1,10 @@
+{
+  "state": "NORMAL",
+  "peak_value": null,
+  "current_value": null,
+  "warning_threshold": -0.05,
+  "halt_threshold": -0.1,
+  "recovery_threshold": -0.05,
+  "saved_at": "2026-04-25T17:44:44.078107",
+  "history_tail": []
+}

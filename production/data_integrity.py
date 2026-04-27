@@ -114,8 +114,8 @@ class CorporateActionAdjuster:
                 f"Corporate actions CSV is missing columns: {missing}"
             )
 
-        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True)
-        df["EX_DATE"] = pd.to_datetime(df["EX_DATE"], dayfirst=True)
+        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=False)
+        df["EX_DATE"] = pd.to_datetime(df["EX_DATE"], dayfirst=False)
         df["ACTION_TYPE"] = df["ACTION_TYPE"].str.upper().str.strip()
         df["RATIO"] = pd.to_numeric(df["RATIO"], errors="coerce").fillna(1.0)
 
@@ -230,15 +230,59 @@ class CorporateActionAdjuster:
                     sc_code, ratio, denom, ex_date.date(),
                 )
 
+            elif action == "DIVIDEND":
+                # P04: Ex-dividend price adjustment.
+                # For a cash dividend of Rs D on EX_DATE, all historical prices
+                # before EX_DATE are adjusted downward:
+                #   price_adj = price * (close_prev - D) / close_prev
+                # where close_prev is the close on the last day before EX_DATE.
+                dividend = ratio   # RATIO column holds dividend amount in Rs
+                if dividend <= 0:
+                    logger.debug(
+                        "SC_CODE=%s: dividend=%.2f is zero/negative -- skipping",
+                        sc_code, dividend,
+                    )
+                    continue
+
+                # Find close price on last trading day before EX_DATE
+                prev_rows = out[out["DATE"] < ex_date]
+                if prev_rows.empty:
+                    logger.debug(
+                        "SC_CODE=%s: no rows before EX_DATE %s -- skipping dividend adj",
+                        sc_code, ex_date.date(),
+                    )
+                    continue
+                close_prev = float(prev_rows.iloc[-1]["Close"])
+                if close_prev <= 0:
+                    continue
+
+                factor = (close_prev - dividend) / close_prev
+                if factor <= 0:
+                    # Dividend > close price -- data error, skip
+                    logger.warning(
+                        "SC_CODE=%s: dividend %.2f >= close %.2f -- skipping",
+                        sc_code, dividend, close_prev,
+                    )
+                    continue
+
+                for col in OHLC_COLS:
+                    if col in out.columns:
+                        out.loc[pre_mask, col] = out.loc[pre_mask, col] * factor
+                # Volume is NOT adjusted for dividends
+                logger.debug(
+                    "SC_CODE=%s DIVIDEND Rs%.2f applied before %s (factor=%.6f)",
+                    sc_code, dividend, ex_date.date(), factor,
+                )
+
             elif action == "RIGHTS":
                 logger.info(
-                    "SC_CODE=%s RIGHTS issue on %s – flagged, not adjusted",
+                    "SC_CODE=%s RIGHTS issue on %s -- flagged, not adjusted",
                     sc_code, ex_date.date(),
                 )
 
             else:
                 logger.warning(
-                    "SC_CODE=%s: unknown action type '%s' – skipping",
+                    "SC_CODE=%s: unknown action type '%s' -- skipping",
                     sc_code, action,
                 )
 

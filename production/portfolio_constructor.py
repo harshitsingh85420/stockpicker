@@ -423,6 +423,8 @@ class PortfolioConstructor:
         current_positions_df: Optional[pd.DataFrame] = None,
         current_deployed_capital: float = 0.0,
         total_capital: float = 1_000_000,
+        events_df: Optional[pd.DataFrame] = None,
+        signal_date=None,
     ) -> pd.DataFrame:
         """
         Run the full portfolio construction pipeline.
@@ -460,6 +462,14 @@ class PortfolioConstructor:
         # Ensure sector column
         if "sector" not in df.columns:
             df["sector"] = df["sc_name"].apply(self.classify_sector)
+
+        # --- Stage 0: P21 event blackout filter (before all other filters) ---
+        if events_df is not None and not events_df.empty and signal_date is not None:
+            code_col_ev = "SC_CODE" if "SC_CODE" in df.columns else "sc_code"
+            ev_filter = EventBlackoutFilter()
+            df, _ = ev_filter.apply(df, events_df, signal_date, sc_code_col=code_col_ev)
+            if df.empty:
+                return df
 
         # --- Stage 1: probability filter ---
         df = self._filter_by_probability(df)
@@ -697,6 +707,83 @@ class CorrelationMonitor:
 
         pairs.sort(key=lambda x: abs(x[2]), reverse=True)
         return pairs
+
+
+# ---------------------------------------------------------------------------
+# P21 -- Event-date blackout filter
+# ---------------------------------------------------------------------------
+
+class EventBlackoutFilter:
+    """
+    P21 -- Remove picks whose ex-date or earnings date falls within a
+    configurable window around the signal date.
+
+    Trading around corporate events (earnings, dividends, bonus issues)
+    introduces binary jump risk that the model has not been trained to handle.
+
+    Parameters
+    ----------
+    days_before : int
+        Sessions before the event to start the blackout (default 2).
+    days_after  : int
+        Sessions after the event to end the blackout (default 1).
+    """
+
+    def __init__(self, days_before: int = 2, days_after: int = 1) -> None:
+        self.days_before = days_before
+        self.days_after  = days_after
+
+    def apply(
+        self,
+        picks_df: pd.DataFrame,
+        events_df: pd.DataFrame,
+        signal_date,
+        sc_code_col:  str = "SC_CODE",
+        event_date_col: str = "event_date",
+    ) -> tuple:
+        """
+        Remove picks that are within the blackout window of any known event.
+
+        Parameters
+        ----------
+        picks_df       : Picks DataFrame with sc_code_col column.
+        events_df      : DataFrame with columns [sc_code_col, event_date_col].
+                         event_date_col should be parseable as datetime.
+        signal_date    : The date for which signals were generated.
+        sc_code_col    : Column name for stock code in both DataFrames.
+        event_date_col : Column name for event date in events_df.
+
+        Returns
+        -------
+        (passed_df, blacklisted_df)
+        """
+        if picks_df.empty or events_df.empty:
+            return picks_df, pd.DataFrame(columns=picks_df.columns)
+
+        sig_ts = pd.Timestamp(signal_date)
+        lo = sig_ts - pd.offsets.BDay(self.days_before)
+        hi = sig_ts + pd.offsets.BDay(self.days_after)
+
+        ev = events_df.copy()
+        ev[event_date_col] = pd.to_datetime(ev[event_date_col])
+
+        # Stocks with an event in the blackout window
+        in_window = ev[
+            (ev[event_date_col] >= lo) & (ev[event_date_col] <= hi)
+        ][sc_code_col].astype(str).unique()
+
+        blackout_mask = picks_df[sc_code_col].astype(str).isin(in_window)
+        passed      = picks_df[~blackout_mask].copy()
+        blacklisted = picks_df[blackout_mask].copy()
+
+        if len(blacklisted):
+            import logging
+            logging.getLogger(__name__).info(
+                "P21 EventBlackout [%s]: removed %d picks near event dates: %s",
+                signal_date, len(blacklisted),
+                blacklisted[sc_code_col].tolist()[:5],
+            )
+        return passed, blacklisted
 
 
 # ---------------------------------------------------------------------------
