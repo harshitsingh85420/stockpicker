@@ -388,34 +388,96 @@ def fracdiff_series(series: pd.Series, d: float, threshold: float = 1e-5) -> pd.
     return pd.Series(out, index=series.index)
 
 
+_D_CACHE_PATH = Path("stock_picker_data/cache/fracdiff_d_cache.pkl")
+_D_CACHE: dict = {}
+
+
+def _load_d_cache() -> dict:
+    global _D_CACHE
+    if _D_CACHE:
+        return _D_CACHE
+    if _D_CACHE_PATH.exists():
+        try:
+            import pickle
+            _D_CACHE = pickle.load(open(_D_CACHE_PATH, "rb"))
+        except Exception:
+            _D_CACHE = {}
+    return _D_CACHE
+
+
+def _save_d_cache(cache: dict) -> None:
+    try:
+        import pickle
+        _D_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pickle.dump(cache, open(_D_CACHE_PATH, "wb"))
+    except Exception:
+        pass
+
+
+def find_min_d(series: pd.Series, max_d: float = 1.0, step: float = 0.1,
+               pvalue_thresh: float = 0.05) -> float:
+    """P41: Find minimum d that makes series stationary (ADF p < pvalue_thresh)."""
+    try:
+        from scipy.stats import adfuller
+    except ImportError:
+        return 0.4  # fallback
+    for d in np.arange(0.1, max_d + step, step):
+        d = round(d, 2)
+        fd = fracdiff_series(series, d=d, threshold=1e-3)
+        fd_clean = fd.dropna()
+        if len(fd_clean) < 30:
+            continue
+        try:
+            pval = adfuller(fd_clean, maxlag=1, autolag=None)[1]
+            if pval < pvalue_thresh:
+                return d
+        except Exception:
+            continue
+    return 1.0
+
+
 def add_fracdiff_features(
     df: pd.DataFrame,
     d: float = 0.4,
-    threshold: float = 1e-5,
+    threshold: float = 1e-3,
+    use_d_cache: bool = True,
 ) -> pd.DataFrame:
     """
-    P14 -- Add fractionally differentiated close price as a feature.
+    P14/P41 — Add fractionally differentiated close price as a feature.
 
-    Produces two columns:
-      FracDiff_Close    -- fracdiff of Close with order d
-      FracDiff_LogClose -- fracdiff of log(Close) with order d
+    Produces columns:
+      FracDiff_Close    — fracdiff of Close with per-symbol optimal d
+      FracDiff_LogClose — fracdiff of log(Close) with same d
 
-    These preserve maximum price memory while being approximately stationary,
-    unlike log-returns (d=1) which discard all level information.
-
-    Parameters
-    ----------
-    d : Fractional order (default 0.4 -- near-stationary for equity price
-        series while retaining ~60% of historical memory).
+    P41: d is computed per-symbol using ADF stationarity test and cached
+    in stock_picker_data/cache/fracdiff_d_cache.pkl for speed.
+    Fixed d=0.4 used as fallback when cache is warm.
     """
+    cache = _load_d_cache() if use_d_cache else {}
+    cache_dirty = False
+
     def _fracdiff_group(g: pd.DataFrame) -> pd.DataFrame:
+        nonlocal cache_dirty
         g = g.sort_values("DATE").copy()
-        g["FracDiff_Close"]    = fracdiff_series(g["Close"], d=d, threshold=threshold)
+        sc = g["SC_CODE"].iloc[0] if "SC_CODE" in g.columns else "UNK"
+
+        if use_d_cache and sc in cache:
+            d_val = cache[sc]
+        else:
+            d_val = find_min_d(g["Close"])
+            if use_d_cache:
+                cache[sc] = d_val
+                cache_dirty = True
+
+        g["FracDiff_Close"]    = fracdiff_series(g["Close"], d=d_val, threshold=threshold)
         log_close = np.log(g["Close"].replace(0, np.nan))
-        g["FracDiff_LogClose"] = fracdiff_series(log_close,  d=d, threshold=threshold)
+        g["FracDiff_LogClose"] = fracdiff_series(log_close,  d=d_val, threshold=threshold)
         return g
 
-    return df.groupby("SC_CODE", group_keys=False).apply(_fracdiff_group)
+    result = df.groupby("SC_CODE", group_keys=False).apply(_fracdiff_group)
+    if cache_dirty:
+        _save_d_cache(cache)
+    return result
 
 
 def add_triple_barrier_labels(
@@ -516,6 +578,140 @@ def add_triple_barrier_labels(
     n_time   = (result["Label_tb_barrier"] == "time").sum()
     print(f"* Triple-barrier labels: profit={n_profit}  stop={n_stop}  time={n_time}")
     return result
+
+
+# ===========================================================================
+# P47 — FII/DII market-wide features
+# ===========================================================================
+
+class FIIDIIFeatures:
+    """
+    P47: Fetch NSE FII/DII aggregate data and produce daily market features.
+
+    Availability probe is run on first call.  If the API is unreachable the
+    methods return None silently so callers can fall back to OHLCV-only features.
+
+    Features produced (one row per date, market-wide):
+        fii_net_crore  — FII net buy/sell in crore INR (positive=buy)
+        dii_net_crore  — DII net buy/sell in crore INR
+        fii_dii_ratio  — fii_net / (abs(fii_net) + abs(dii_net) + 1)
+        delivery_pct   — NSE equity delivery % (if available)
+    """
+
+    _CACHE_PATH = Path("stock_picker_data/cache/fii_dii_cache.pkl")
+    _api_available: bool | None = None
+
+    def probe_api(self) -> bool:
+        """Test if nsepython FII/DII endpoint is reachable. Caches result."""
+        if FIIDIIFeatures._api_available is not None:
+            return FIIDIIFeatures._api_available
+        try:
+            import nsepython  # type: ignore
+            # Try fetching recent data
+            df = nsepython.fii_dii_data()
+            FIIDIIFeatures._api_available = df is not None and not df.empty
+        except Exception:
+            FIIDIIFeatures._api_available = False
+        return FIIDIIFeatures._api_available
+
+    def fetch(self, start_date: str, end_date: str) -> "pd.DataFrame | None":
+        """
+        Fetch FII/DII data for date range.  Returns DataFrame with columns:
+            DATE, fii_net_crore, dii_net_crore, fii_dii_ratio
+
+        Returns None if API unavailable or on error.
+        """
+        import logging
+        log = logging.getLogger(__name__)
+
+        if not self.probe_api():
+            log.info("P47: NSE FII/DII API not available — skipping FII features.")
+            return None
+
+        cache = self._load_cache()
+        if cache is not None:
+            cached_dates = set(cache["DATE"].astype(str))
+            needed = {d for d in pd.date_range(start_date, end_date, freq="B").strftime("%Y-%m-%d")
+                      if d not in cached_dates}
+            if not needed:
+                return self._filter(cache, start_date, end_date)
+
+        try:
+            import nsepython  # type: ignore
+            raw = nsepython.fii_dii_data()
+            if raw is None or raw.empty:
+                return None
+            df = raw.copy()
+            # Normalise columns
+            df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+            date_col = next((c for c in df.columns if "date" in c), None)
+            if date_col is None:
+                return None
+            df["DATE"] = pd.to_datetime(df[date_col]).dt.normalize()
+            fii_buy  = next((c for c in df.columns if "fii" in c and "buy" in c), None)
+            fii_sell = next((c for c in df.columns if "fii" in c and "sell" in c), None)
+            dii_buy  = next((c for c in df.columns if "dii" in c and "buy" in c), None)
+            dii_sell = next((c for c in df.columns if "dii" in c and "sell" in c), None)
+
+            def _to_float(col):
+                if col and col in df.columns:
+                    return pd.to_numeric(df[col].astype(str).str.replace(",", ""), errors="coerce")
+                return pd.Series(0.0, index=df.index)
+
+            df["fii_net_crore"] = _to_float(fii_buy) - _to_float(fii_sell)
+            df["dii_net_crore"] = _to_float(dii_buy) - _to_float(dii_sell)
+            total = df["fii_net_crore"].abs() + df["dii_net_crore"].abs() + 1
+            df["fii_dii_ratio"] = df["fii_net_crore"] / total
+
+            result = df[["DATE", "fii_net_crore", "dii_net_crore", "fii_dii_ratio"]].dropna(subset=["DATE"])
+            self._save_cache(result)
+            return self._filter(result, start_date, end_date)
+        except Exception as exc:
+            log.warning("P47: FII/DII fetch error: %s", exc)
+            return None
+
+    def merge_into_features(
+        self,
+        feat_df: pd.DataFrame,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """
+        Left-join FII/DII market features into feat_df on DATE.
+        If unavailable, returns feat_df unchanged (no crash).
+        """
+        fii_df = self.fetch(start_date, end_date)
+        if fii_df is None or fii_df.empty:
+            return feat_df
+        feat_df = feat_df.copy()
+        feat_df["DATE"] = pd.to_datetime(feat_df["DATE"]).dt.normalize()
+        fii_df["DATE"]  = pd.to_datetime(fii_df["DATE"]).dt.normalize()
+        merged = feat_df.merge(fii_df, on="DATE", how="left")
+        # Forward-fill missing dates (weekends / holidays)
+        for col in ["fii_net_crore", "dii_net_crore", "fii_dii_ratio"]:
+            if col in merged.columns:
+                merged[col] = merged[col].fillna(method="ffill").fillna(0.0)
+        return merged
+
+    def _filter(self, df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+        df = df.copy()
+        df["DATE"] = pd.to_datetime(df["DATE"])
+        return df[(df["DATE"] >= start) & (df["DATE"] <= end)].reset_index(drop=True)
+
+    def _load_cache(self) -> "pd.DataFrame | None":
+        try:
+            if self._CACHE_PATH.exists():
+                return pd.read_pickle(self._CACHE_PATH)
+        except Exception:
+            pass
+        return None
+
+    def _save_cache(self, df: pd.DataFrame) -> None:
+        try:
+            self._CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            df.to_pickle(self._CACHE_PATH)
+        except Exception:
+            pass
 
 
 # Test

@@ -1,0 +1,39 @@
+# P51 — Pinned production requirements
+# Generated 2026-04-27
+# Install: pip install -r requirements-pinned.txt
+
+# Core
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.0
+
+# Machine learning
+lightgbm==4.3.0
+xgboost==2.0.3
+scikit-learn==1.4.2
+
+# Statistics / calibration
+statsmodels==0.14.2
+
+# Regime detection (HMM)
+hmmlearn==0.3.2
+
+# Data fetching
+yfinance==0.2.40
+requests==2.31.0
+beautifulsoup4==4.12.3
+bse==0.1.9
+
+# Utilities
+tqdm==4.66.4
+joblib==1.4.2
+python-dateutil==2.9.0
+pytz==2024.1
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.2.0
+
+# Optional — comment out if not needed
+# kiteconnect==5.0.1   # Zerodha live trading
+# nsepython==2.0.6     # NSE FII/DII data

@@ -348,3 +348,120 @@ class AblationTester:
             auc = roc_auc_score(y[va_idx], m.predict(X[va_idx]))
             aucs.append(auc)
         return float(np.mean(aucs)) if aucs else 0.5
+
+
+# ===========================================================================
+# P44 — Multi-benchmark comparison with WINS/LOSES verdicts
+# ===========================================================================
+
+BENCHMARK_TICKERS = {
+    "Nifty 50":       "^NSEI",
+    "Sensex":         "^BSESN",
+    "Nifty MidCap150":"NIFTY_MIDCAP_150.NS",
+    "Equal-weight 60pct cash": None,   # synthetic: 60% Nifty + 40% cash (0%)
+}
+
+
+def run_benchmark_comparison(
+    detail_df: pd.DataFrame,
+    start_date: str = "2025-04-01",
+    end_date:   str = "2026-03-30",
+) -> Dict[str, Any]:
+    """
+    P44: Compare strategy against 4 benchmarks and print WINS/LOSES verdicts.
+
+    Parameters
+    ----------
+    detail_df  : Walk-forward detail CSV with columns pred_date, gross_return.
+                 If empty, uses WF result CSV from disk if available.
+    start_date, end_date : Comparison date range.
+
+    Returns dict mapping benchmark_name -> {strategy_*, benchmark_*, verdict}.
+    """
+    if detail_df is None or detail_df.empty:
+        # Try to load from disk
+        from pathlib import Path
+        results_dir = Path("stock_picker_data/results")
+        wf_files = sorted(results_dir.glob("wf_detail_*.csv"))
+        if wf_files:
+            detail_df = pd.read_csv(wf_files[-1])
+            logger.info("P44: Loaded WF detail from %s", wf_files[-1])
+        else:
+            return {"error": "No detail_df and no wf_detail_*.csv found."}
+
+    cmp     = BenchmarkComparator()
+    results = {}
+
+    # 1–3: Fetch index data
+    for bench_name, ticker in BENCHMARK_TICKERS.items():
+        if ticker is None:
+            # Synthetic: 60% Nifty + 40% cash
+            nifty_df = _fetch_index("^NSEI", start_date, end_date)
+            if nifty_df is None or nifty_df.empty:
+                results[bench_name] = {"error": "Nifty unavailable for synthetic benchmark"}
+                continue
+            nifty_df = nifty_df.copy()
+            nifty_df["Close"] = (
+                nifty_df["Close"].pct_change().fillna(0) * 0.60 + 0.0
+            ).add(1).cumprod() * 100   # rebased to 100
+            bench_df = nifty_df
+        else:
+            bench_df = _fetch_index(ticker, start_date, end_date)
+
+        report = cmp.compare(detail_df, nifty_df=bench_df,
+                              start_date=start_date, end_date=end_date)
+        if "error" in report:
+            results[bench_name] = report
+            continue
+
+        # Verdict: WINS if strategy CAGR > benchmark CAGR
+        s_cagr = report.get("strategy_cagr", 0.0)
+        b_cagr = report.get("benchmark_cagr", 0.0)
+        verdict = "WINS" if s_cagr > b_cagr else "LOSES"
+        report["verdict"] = verdict
+        results[bench_name] = report
+
+    print_benchmark_verdicts(results, start_date, end_date)
+    return results
+
+
+def _fetch_index(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
+    """Fetch index OHLCV from yfinance."""
+    try:
+        import yfinance as yf
+        raw = yf.Ticker(ticker).history(start=start, end=end, interval="1d").reset_index()
+        date_col = "Date" if "Date" in raw.columns else raw.columns[0]
+        df = pd.DataFrame({
+            "DATE":  pd.to_datetime(raw[date_col]).dt.normalize(),
+            "Close": raw["Close"].astype(float),
+        })
+        return df.dropna().sort_values("DATE").reset_index(drop=True)
+    except Exception as exc:
+        logger.warning("P44: %s fetch failed: %s", ticker, exc)
+        return None
+
+
+def print_benchmark_verdicts(results: Dict[str, Any], start: str, end: str) -> None:
+    """Print a compact WINS/LOSES table."""
+    print()
+    print("=" * 64)
+    print(f"  P44 BENCHMARK COMPARISON  {start} → {end}")
+    print("=" * 64)
+    print(f"  {'Benchmark':<28}  {'Strat CAGR':>10}  {'Bench CAGR':>10}  {'Verdict':>7}")
+    print(f"  {'-'*28}  {'-'*10}  {'-'*10}  {'-'*7}")
+    wins = 0
+    for bench_name, report in results.items():
+        if "error" in report:
+            print(f"  {bench_name:<28}  {'N/A':>10}  {'N/A':>10}  {'ERROR':>7}")
+            continue
+        s = report.get("strategy_cagr", 0.0)
+        b = report.get("benchmark_cagr", 0.0)
+        v = report.get("verdict", "?")
+        if v == "WINS":
+            wins += 1
+        print(f"  {bench_name:<28}  {s*100:>9.1f}%  {b*100:>9.1f}%  {v:>7}")
+    total = sum(1 for r in results.values() if "error" not in r)
+    print(f"  {'-'*64}")
+    print(f"  Overall: {wins}/{total} benchmarks beaten")
+    print("=" * 64)
+    print()

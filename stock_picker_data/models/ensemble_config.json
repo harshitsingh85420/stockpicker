@@ -1,0 +1,6 @@
+{
+  "lgb_weight": 0.60,
+  "xgb_weight": 0.40,
+  "high_conviction_min": 0.55,
+  "note": "Both models must exceed high_conviction_min for a pick to be valid"
+}

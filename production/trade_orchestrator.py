@@ -160,6 +160,11 @@ class TradeOrchestrator:
         if self._kill_switch_active():
             logger.warning("Kill switch ACTIVE — no trades today.")
             self._audit("SYSTEM_STOP", reason="kill_switch")
+            try:
+                from production.alerting import alert_kill_switch_activated
+                alert_kill_switch_activated("Kill switch file present at run start")
+            except Exception:
+                pass
             self._write_daily_summary(result, ref_date)
             return result
 
@@ -169,11 +174,21 @@ class TradeOrchestrator:
         if cb_state == "HALTED":
             logger.error("Circuit breaker HALTED — no new trades.")
             self._audit("RISK_CHECK", circuit_breaker="HALTED")
+            try:
+                from production.alerting import alert_circuit_breaker_halted
+                alert_circuit_breaker_halted(self.cfg.drawdown_halt)
+            except Exception:
+                pass
             self._write_daily_summary(result, ref_date)
             return result
         if cb_state == "WARNING":
             logger.warning("Circuit breaker WARNING — positions halved.")
             result["action"] = "REDUCED_SIZE"
+            try:
+                from production.alerting import alert_circuit_breaker_warning
+                alert_circuit_breaker_warning(self.cfg.drawdown_warning)
+            except Exception:
+                pass
 
         # -- L1: Data Integrity ----------------------------------------
         logger.info("-- L1  Data Integrity ----------------------------------")
@@ -240,6 +255,11 @@ class TradeOrchestrator:
         # -- L8: Annotate & validate -----------------------------------
         picks_df = self._annotate(picks_df, regime, ref_date, explanations, shap_df)
 
+        # -- P49: Risk analytics (VaR + stress) ------------------------
+        logger.info("-- P49 Risk Analytics ----------------------------------")
+        var_report = self._p49_risk(picks_df)
+        result["var_report"] = var_report
+
         # -- L9: Compliance & audit ------------------------------------
         logger.info("-- L9  Compliance & Audit ------------------------------")
         self._l9_compliance(picks_df, ref_date)
@@ -247,6 +267,13 @@ class TradeOrchestrator:
         # -- Write CSV -------------------------------------------------
         csv_path = self._write_csv(picks_df, ref_date)
         self._print_summary(picks_df, ref_date)
+
+        # P50: Alert picks ready
+        try:
+            from production.alerting import alert_picks_ready
+            alert_picks_ready(len(picks_df), ref_date, str(csv_path))
+        except Exception:
+            pass
 
         final_action = result["action"] if result["action"] == "REDUCED_SIZE" else "TRADE"
         result.update(picks=picks_df, action=final_action, output_csv=str(csv_path))
@@ -280,6 +307,11 @@ class TradeOrchestrator:
 
             if bhav_df is None:
                 logger.critical("L1: All data sources exhausted — SKIP_DAY.")
+                try:
+                    from production.alerting import alert_data_source_failed
+                    alert_data_source_failed("BSE BhavCopy (all failover sources)", fallback=None)
+                except Exception:
+                    pass
                 return None
         else:
             # Standardise if caller passed raw data
@@ -808,6 +840,18 @@ class TradeOrchestrator:
             logger.info("P38 daily_summary written -> %s", out_path)
         except Exception as exc:
             logger.debug("P38 daily_summary write failed: %s", exc)
+
+    def _p49_risk(self, picks_df: pd.DataFrame) -> dict:
+        """P49: Compute VaR and run stress tests; log results."""
+        try:
+            from production.risk_analytics import PortfolioRiskMonitor
+            risk = PortfolioRiskMonitor()
+            var_report   = risk.compute_var(picks_df)
+            stress_report = risk.run_stress_test(picks_df)
+            return {"var": var_report, "stress": stress_report}
+        except Exception as exc:
+            logger.debug("P49: risk analytics skipped: %s", exc)
+            return {}
 
     def _audit(self, event_type, **kwargs):
         try:
