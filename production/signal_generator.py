@@ -48,6 +48,8 @@ BASE_FEATURE_COLS = [
     "W_BBWidth", "W_TrendOK", "W_BBWidthPctl",
     # P14: fractional differentiation features
     "FracDiff_Close", "FracDiff_LogClose",
+    # P47: FII/DII market-wide sentiment (filled with 0 when API unavailable)
+    "fii_net_crore", "dii_net_crore", "fii_dii_ratio",
 ]
 
 # Label column produced by add_forward_returns()

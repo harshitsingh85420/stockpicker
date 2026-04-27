@@ -9,9 +9,9 @@ Two-layer regime system for Indian equity markets:
 1. ``IndexRegimeFilter``  — fast, always-on EMA-based filter using Nifty 50.
    No external library dependencies beyond yfinance + pandas/numpy.
 
-2. ``HMMRegimeDetector`` — 4-state Hidden Markov Model that classifies the
-   market into BULL_TRENDING, BEAR_TRENDING, HIGH_VOLATILITY, or SIDEWAYS.
-   Requires hmmlearn; degrades gracefully if not installed.
+2. ``HMMRegimeDetector`` — 2-state Hidden Markov Model that classifies the
+   market into BULL or BEAR.  Requires hmmlearn; degrades gracefully if not
+   installed.
 
 3. ``get_combined_regime()`` — module-level helper that runs both layers and
    returns a single consolidated assessment dict.
