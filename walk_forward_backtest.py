@@ -884,9 +884,17 @@ def main():
                    help="Probability threshold (default 0.62)")
     p.add_argument("--boost-rounds",      type=int,   default=300,
                    help="Max LightGBM boost rounds per block (default 300)")
+    p.add_argument("--fwd-sessions",      type=int,   default=5,
+                   help="Forward sessions for outcome measurement (default 5)")
+    p.add_argument("--compare-sessions",  action="store_true",
+                   help="Run backtest for fwd_sessions=3,4,5 and print comparison table")
     p.add_argument("--no-charts",         action="store_true",
                    help="Skip chart generation")
     args = p.parse_args()
+
+    if args.compare_sessions:
+        _compare_time_stops(args)
+        sys.exit(0)
 
     result = run_walk_forward(
         end_date=args.date,
@@ -896,11 +904,57 @@ def main():
         min_train_months=args.min_train_months,
         threshold=args.threshold,
         boost_rounds=args.boost_rounds,
+        fwd_sessions=args.fwd_sessions,
         draw_charts=not args.no_charts,
     )
     print_walk_forward_summary(result["summary"], result["block_stats"])
     if result.get("chart_path"):
         print(f"  Chart -> {result['chart_path']}\n")
+
+
+def _compare_time_stops(args) -> None:
+    """
+    Run walk-forward backtest for fwd_sessions in [3, 4, 5] and print a
+    side-by-side comparison table.  Helps quantify whether shorter holding
+    periods improve net win rate after friction.
+    """
+    rows = []
+    for n in [3, 4, 5]:
+        print(f"\n{'='*60}")
+        print(f"  Running fwd_sessions={n} ...")
+        print(f"{'='*60}")
+        res = run_walk_forward(
+            end_date=args.date,
+            lookback_days=args.lookback,
+            months_per_block=args.months_per_block,
+            embargo_sessions=args.embargo,
+            min_train_months=args.min_train_months,
+            threshold=args.threshold,
+            boost_rounds=args.boost_rounds,
+            fwd_sessions=n,
+            draw_charts=False,
+        )
+        s = res.get("summary", {})
+        rows.append({
+            "fwd_sessions":   n,
+            "n_picks":        s.get("total_picks", 0),
+            "gross_wr":       s.get("overall_win_rate", 0),
+            "net_wr":         s.get("net_win_rate", 0),
+            "avg_net_ret":    s.get("avg_return_net", 0),
+            "median_net_ret": s.get("median_return_net", 0),
+        })
+
+    print("\n" + "="*72)
+    print("  TIME STOP COMPARISON  (lower fwd_sessions = shorter hold)")
+    print("="*72)
+    print(f"  {'Sessions':>8}  {'Picks':>6}  {'Gross WR':>9}  {'Net WR':>9}  "
+          f"{'Avg Net':>9}  {'Median Net':>10}")
+    print(f"  {'-'*8}  {'-'*6}  {'-'*9}  {'-'*9}  {'-'*9}  {'-'*10}")
+    for r in rows:
+        print(f"  {r['fwd_sessions']:>8}  {r['n_picks']:>6}  "
+              f"{r['gross_wr']*100:>8.1f}%  {r['net_wr']*100:>8.1f}%  "
+              f"{r['avg_net_ret']*100:>8.2f}%  {r['median_net_ret']*100:>9.2f}%")
+    print("="*72)
 
 
 if __name__ == "__main__":
