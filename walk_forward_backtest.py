@@ -260,6 +260,7 @@ def _predict_block(
     block_end,
     threshold: float,
     fwd_sessions: int = 5,
+    xgb_model=None,
 ) -> pd.DataFrame:
     """
     Generate predictions for every trading day in [block_start, block_end].
@@ -306,9 +307,23 @@ def _predict_block(
 
         X_slice = rows.reindex(columns=feature_cols, fill_value=0).fillna(0)
         try:
-            probs = model.predict(X_slice.values)
+            lgb_probs = model.predict(X_slice.values)
         except Exception:
             continue
+
+        # P40: XGBoost ensemble — blend 60/40, require both models >= 0.55
+        probs = lgb_probs.copy()
+        if xgb_model is not None:
+            try:
+                import xgboost as xgb
+                dmat      = xgb.DMatrix(X_slice.values)
+                xgb_probs = xgb_model.predict(dmat)
+                hc_min    = 0.55
+                both_agree = (lgb_probs >= hc_min) & (xgb_probs >= hc_min)
+                blended    = 0.60 * lgb_probs + 0.40 * xgb_probs
+                probs      = np.where(both_agree, blended, 0.0)
+            except Exception as _xgb_err:
+                logger.debug("P40 XGB ensemble skipped for %s: %s", d, _xgb_err)
 
         rows = rows.copy()
         rows["Probability"] = probs
@@ -598,6 +613,20 @@ def run_walk_forward(
     for i, (bs, be) in enumerate(test_blocks, 1):
         logger.info("  Block %d: test %s -> %s", i, bs, be)
 
+    # P40: Load pre-trained XGB ensemble member once (trained by train_model.py)
+    _xgb_model = None
+    _xgb_path  = MODELS_DIR / "xgb_model.pkl"
+    if _xgb_path.exists():
+        try:
+            import pickle as _pkl
+            with open(_xgb_path, "rb") as _fh:
+                _xgb_model = _pkl.load(_fh)
+            logger.info("P40 XGB ensemble model loaded from %s", _xgb_path)
+        except Exception as _xe:
+            logger.warning("P40 XGB load failed (%s) — LGB-only predictions", _xe)
+    else:
+        logger.warning("P40 xgb_model.pkl not found — LGB-only predictions")
+
     # -- Walk-forward loop -------------------------------------------------
     all_block_stats = []
     all_details     = []
@@ -645,6 +674,7 @@ def run_walk_forward(
             block_end=block_end,
             threshold=threshold,
             fwd_sessions=fwd_sessions,
+            xgb_model=_xgb_model,
         )
 
         if not detail.empty:
@@ -937,9 +967,9 @@ def _compare_time_stops(args) -> None:
         s = res.get("summary", {})
         rows.append({
             "fwd_sessions":   n,
-            "n_picks":        s.get("total_picks", 0),
+            "n_picks":        s.get("n_picks_total", 0),
             "gross_wr":       s.get("overall_win_rate", 0),
-            "net_wr":         s.get("net_win_rate", 0),
+            "net_wr":         s.get("overall_win_net", 0),
             "avg_net_ret":    s.get("avg_return_net", 0),
             "median_net_ret": s.get("median_return_net", 0),
         })
