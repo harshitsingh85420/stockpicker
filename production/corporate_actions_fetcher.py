@@ -273,8 +273,23 @@ class CorporateActionsFetcher:
         bse_cache_dir = Path("tmp/bse_cache")
         bse_cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Hard 5-minute wall-clock budget across all stocks — abort early if exceeded.
+        import time as _time
+        _deadline = _time.monotonic() + 300   # 5 minutes
+        _timeout_logged = False
+
         rows = []
         for sc_code in sc_codes:
+            if _time.monotonic() > _deadline:
+                if not _timeout_logged:
+                    logger.warning(
+                        "P28: Corporate actions fetcher hit 5-min timeout after %d stocks "
+                        "— stopping early. Already-fetched data will be used.",
+                        len(rows),
+                    )
+                    _timeout_logged = True
+                break
+
             try:
                 with _BSEClient(download_folder=str(bse_cache_dir)) as bse_client:
                     data = bse_client.actions(scripcode=str(sc_code))
@@ -293,7 +308,6 @@ class CorporateActionsFetcher:
                     if start_dt and ex_date < start_dt:
                         continue
 
-                    purpose_upper = purpose.upper()
                     action_type, ratio, bonus_denom = self._parse_purpose(purpose.lower())
                     if action_type is None:
                         continue
@@ -309,7 +323,7 @@ class CorporateActionsFetcher:
                     })
 
             except Exception as exc:
-                logger.warning(
+                logger.debug(
                     "P28: BSE package fetch failed for %s: %s — skipping.", sc_code, exc
                 )
                 continue

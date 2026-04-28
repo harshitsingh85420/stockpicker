@@ -980,6 +980,80 @@ def calibration_curve_report(
     return result
 
 
+def fit_oof_calibrator(
+    model,
+    X: np.ndarray,
+    y: np.ndarray,
+    n_splits: int = 5,
+    method: str = "isotonic",
+) -> "ProbabilityCalibrator":
+    """
+    P43 (fix): Fit a calibrator using out-of-fold predictions from the
+    training data.  This avoids overfitting the calibrator to the same data
+    the base model was fitted on, which causes ECE inflation in later blocks.
+
+    Parameters
+    ----------
+    model    : Fitted LightGBM/XGBoost model with a .predict() method.
+    X        : Training features (numpy array, same order as model was trained on).
+    y        : Binary labels (0/1).
+    n_splits : Number of TimeSeriesSplit folds (default 5).
+    method   : 'isotonic' (default) or 'platt'.
+
+    Returns
+    -------
+    Fitted ProbabilityCalibrator instance.
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    oof_probs  = np.full(len(y), np.nan)
+    oof_labels = np.full(len(y), np.nan)
+
+    for train_idx, val_idx in tscv.split(X):
+        # Predict on the held-out fold using the already-trained model
+        try:
+            import lightgbm as lgb
+            if isinstance(model, lgb.Booster):
+                fold_probs = model.predict(X[val_idx])
+            else:
+                import xgboost as xgb
+                fold_probs = model.predict(xgb.DMatrix(X[val_idx]))
+        except Exception:
+            try:
+                fold_probs = model.predict(X[val_idx])
+            except Exception:
+                continue
+        oof_probs[val_idx]  = fold_probs
+        oof_labels[val_idx] = y[val_idx]
+
+    valid = ~np.isnan(oof_probs)
+    if valid.sum() < 50:
+        logger.warning(
+            "OOF calibration: only %d valid samples — using global fit instead.",
+            valid.sum(),
+        )
+        cal_method = (CalibrationMethod.ISOTONIC_REGRESSION
+                      if method == "isotonic" else CalibrationMethod.PLATT_SCALING)
+        cal = ProbabilityCalibrator(method=cal_method)
+        cal.fit(y, model.predict(X) if hasattr(model, "predict") else np.zeros(len(y)))
+        return cal
+
+    cal_method = (CalibrationMethod.ISOTONIC_REGRESSION
+                  if method == "isotonic" else CalibrationMethod.PLATT_SCALING)
+    cal = ProbabilityCalibrator(method=cal_method)
+    cal.fit(oof_labels[valid], oof_probs[valid])
+
+    oof_ece_before = compute_ece(oof_labels[valid], oof_probs[valid])
+    cal_probs      = cal.transform(oof_probs[valid])
+    oof_ece_after  = compute_ece(oof_labels[valid], cal_probs)
+    logger.info(
+        "P43 OOF calibration: ECE before=%.4f  after=%.4f  (n=%d, folds=%d)",
+        oof_ece_before, oof_ece_after, valid.sum(), n_splits,
+    )
+    return cal
+
+
 def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
     """
     P43: Expected Calibration Error — call on OOS hold-out blocks only.

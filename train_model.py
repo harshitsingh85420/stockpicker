@@ -245,22 +245,26 @@ def _save_model(model, feature_cols: list, metrics: dict):
 
 
 def _fit_calibrator(model, feat_df: pd.DataFrame, feature_cols: list):
+    """
+    P43 (fix): Fit calibrator using out-of-fold predictions so isotonic
+    regression doesn't overfit to the same data the model was trained on.
+    Falls back to global fit if OOF fails.
+    """
     try:
         import pickle
-        from production.probability_calibration import ProbabilityCalibrator, CalibrationMethod
+        from production.probability_calibration import fit_oof_calibrator
 
         label_col = "Label_fwd5_positive"
         X = feat_df[feature_cols].fillna(0).values
         y = feat_df[label_col].values
-        raw_probs = model.predict(X)
 
-        calibrator = ProbabilityCalibrator(method=CalibrationMethod.ISOTONIC_REGRESSION)
-        calibrator.fit(y, raw_probs)   # fit(y_true, y_prob_raw)
+        # OOF calibration — train-set ECE is no longer the target metric
+        calibrator = fit_oof_calibrator(model, X, y, n_splits=5, method="isotonic")
 
         cal_path = MODEL_DIR / "calibrator.pkl"
         with open(cal_path, "wb") as f:
             pickle.dump(calibrator, f)
-        logger.info("Calibrator saved → %s", cal_path)
+        logger.info("P43 OOF calibrator saved → %s", cal_path)
     except Exception as exc:
         logger.warning("Calibrator fitting skipped: %s", exc)
 
