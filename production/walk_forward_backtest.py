@@ -44,11 +44,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent
+_HERE = Path(__file__).resolve().parent          # …/production/
+_ROOT = _HERE.parent                              # …/stockpicker/  (project root)
 if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-if str(_ROOT / "production") not in sys.path:
-    sys.path.insert(0, str(_ROOT / "production"))
+    sys.path.insert(0, str(_ROOT))               # makes `production.*` importable
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))               # makes sibling modules importable
 
 logger = logging.getLogger(__name__)
 
