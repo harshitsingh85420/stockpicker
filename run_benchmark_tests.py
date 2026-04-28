@@ -45,7 +45,7 @@ def _load_bhav(start: str, end: str) -> pd.DataFrame:
     try:
         from production.data_loader import DataLoader
         dl = DataLoader()
-        bhav = dl.load_range(start, end)
+        bhav = dl.load(start=start, end=end)
         if bhav is None or bhav.empty:
             raise ValueError("Empty bhav from DataLoader")
         return bhav

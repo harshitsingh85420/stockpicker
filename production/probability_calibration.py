@@ -1045,7 +1045,7 @@ def fit_oof_calibrator(
     cal.fit(oof_labels[valid], oof_probs[valid])
 
     oof_ece_before = compute_ece(oof_labels[valid], oof_probs[valid])
-    cal_probs      = cal.transform(oof_probs[valid])
+    cal_probs      = cal.predict(oof_probs[valid])
     oof_ece_after  = compute_ece(oof_labels[valid], cal_probs)
     logger.info(
         "P43 OOF calibration: ECE before=%.4f  after=%.4f  (n=%d, folds=%d)",
