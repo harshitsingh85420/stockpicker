@@ -31,8 +31,5 @@
   "W_TrendOK",
   "W_BBWidthPctl",
   "FracDiff_Close",
-  "FracDiff_LogClose",
-  "fii_net_crore",
-  "dii_net_crore",
-  "fii_dii_ratio"
+  "FracDiff_LogClose"
 ]
