@@ -93,6 +93,14 @@ def _build_features(bhav: pd.DataFrame, use_triple_barrier: bool = False) -> pd.
     logger.info("Building features ...")
     feat_df = prepare_features_all(bhav)
     feat_df = add_fracdiff_features(feat_df, d=0.4)   # P14: fractional differentiation
+    # P47: FII/DII market-wide features (no-op when API unavailable)
+    try:
+        from momentum_features import FIIDIIFeatures
+        start_str = str(bhav["DATE"].min())[:10]
+        end_str   = str(bhav["DATE"].max())[:10]
+        feat_df = FIIDIIFeatures().merge_into_features(feat_df, start_str, end_str)
+    except Exception as _fe:
+        logger.debug("FII/DII features skipped in training: %s", _fe)
     feat_df = add_forward_returns(feat_df, periods=[5])
 
     # P10 -- optionally use triple-barrier labels

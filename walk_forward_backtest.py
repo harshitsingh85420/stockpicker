@@ -132,8 +132,19 @@ def _train_block_model(
 
     # Build features
     try:
-        from momentum_features import prepare_features_all, add_forward_returns
+        from momentum_features import prepare_features_all, add_forward_returns, add_fracdiff_features
         feat_df = prepare_features_all(train_bhav)
+        try:
+            feat_df = add_fracdiff_features(feat_df)
+        except Exception as fe:
+            logger.debug("WF block fracdiff skipped: %s", fe)
+        try:
+            from momentum_features import FIIDIIFeatures
+            start_str = str(train_bhav["DATE"].min())[:10]
+            end_str   = str(train_bhav["DATE"].max())[:10]
+            feat_df = FIIDIIFeatures().merge_into_features(feat_df, start_str, end_str)
+        except Exception as fe:
+            logger.debug("WF block FII/DII skipped: %s", fe)
         feat_df = add_forward_returns(feat_df, periods=[5])
     except Exception as e:
         logger.warning("Feature build failed for block ending %s: %s", train_end_date, e)
@@ -261,7 +272,7 @@ def _predict_block(
     Returns a detail DataFrame with one row per (date, stock) pick.
     """
     try:
-        from momentum_features import prepare_features_all
+        from momentum_features import prepare_features_all, add_fracdiff_features, FIIDIIFeatures
     except ImportError:
         logger.error("Cannot import momentum_features — block prediction skipped.")
         return pd.DataFrame()
@@ -269,6 +280,16 @@ def _predict_block(
     # Compute features on the slice up to block_end (for efficiency)
     block_bhav  = bhav_df[bhav_df["DATE"] <= block_end].copy()
     all_feat_df = prepare_features_all(block_bhav)
+    try:
+        all_feat_df = add_fracdiff_features(all_feat_df)
+    except Exception as _fe:
+        logger.debug("Predict block fracdiff skipped: %s", _fe)
+    try:
+        start_str = str(block_bhav["DATE"].min())[:10]
+        end_str   = str(block_bhav["DATE"].max())[:10]
+        all_feat_df = FIIDIIFeatures().merge_into_features(all_feat_df, start_str, end_str)
+    except Exception as _fe:
+        logger.debug("Predict block FII/DII skipped: %s", _fe)
     all_feat_df["DATE"] = pd.to_datetime(all_feat_df["DATE"]).dt.date
 
     block_dates = sorted([
