@@ -264,6 +264,69 @@ def benchmark_feature_ablation(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark 0: Your ensemble model (walk-forward OOS)
+# ---------------------------------------------------------------------------
+
+def benchmark_model(start: str, end: str, threshold: float = 0.62,
+                    fwd_sessions: int = 5) -> dict:
+    """
+    Run the production walk-forward backtest for [start, end] and return
+    summary metrics.  Uses the same ensemble (LGB 60% + XGB 40%) and
+    friction model as the live pipeline.
+    """
+    try:
+        from production.walk_forward_backtest import run_walk_forward
+    except ImportError as exc:
+        return {"error": str(exc)}
+
+    logger.info("--- Model: walk-forward OOS backtest (%s -> %s) ---", start, end)
+    try:
+        result  = run_walk_forward(
+            end_date=end,
+            lookback_days=(datetime.strptime(end, "%Y-%m-%d") -
+                           datetime.strptime(start, "%Y-%m-%d")).days + 30,
+            months_per_block=3,
+            embargo_sessions=5,
+            min_train_months=9,
+            threshold=threshold,
+            fwd_sessions=fwd_sessions,
+            draw_charts=False,
+        )
+        s = result.get("summary", {})
+        if not s:
+            return {"error": "no summary — too little data or all blocks skipped"}
+
+        n   = s.get("n_picks_total", 0)
+        rets = result.get("detail_df")
+        sharpe = float("nan")
+        if rets is not None and not rets.empty and "return_5d_net" in rets.columns:
+            r = rets["return_5d_net"].dropna()
+            sharpe = float(r.mean() / (r.std() + 1e-9)) * (252 ** 0.5)
+
+        return {
+            "name":          "Ensemble_Model",
+            "n_picks":       n,
+            "gross_win_rate": s.get("overall_win_rate", float("nan")),
+            "net_win_rate":   s.get("overall_win_net",  float("nan")),
+            "mean_return_net": s.get("avg_return_net",  float("nan")),
+            "median_return_net": s.get("median_return_net", float("nan")),
+            "sharpe":         sharpe,
+            "n_blocks":       s.get("n_blocks", 0),
+        }
+    except Exception as exc:
+        logger.warning("Model benchmark failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+def _verdict(model_val: float, bench_val: float, higher_is_better: bool = True) -> str:
+    if any(v != v for v in [model_val, bench_val]):   # nan check
+        return "N/A"
+    if higher_is_better:
+        return "WIN" if model_val > bench_val else "LOSE"
+    return "WIN" if model_val < bench_val else "LOSE"
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -272,10 +335,13 @@ def main():
     parser.add_argument("--start", default=None)
     parser.add_argument("--end",   default=None)
     parser.add_argument("--fwd",   type=int, default=5)
+    parser.add_argument("--threshold", type=float, default=0.62)
     parser.add_argument("--mc_iter", type=int, default=200)
     parser.add_argument("--skip_mc", action="store_true",
                         help="Skip Monte Carlo (slow for large universes)")
     parser.add_argument("--skip_ablation", action="store_true")
+    parser.add_argument("--skip_model", action="store_true",
+                        help="Skip model WF backtest (use if you already have results)")
     args = parser.parse_args()
 
     end_date   = args.end   or datetime.today().strftime("%Y-%m-%d")
@@ -295,6 +361,27 @@ def main():
     nifty = _load_nifty(start_date, end_date)
 
     all_results = {}
+
+    # --- Model (walk-forward OOS) ------------------------------------------
+    bm = {}
+    if not args.skip_model:
+        bm = benchmark_model(start_date, end_date,
+                             threshold=args.threshold, fwd_sessions=args.fwd)
+        all_results["ensemble_model"] = bm
+        if "error" not in bm:
+            logger.info(
+                "Model: picks=%d  gross_WR=%.1f%%  net_WR=%.1f%%  "
+                "mean_net=%.3f%%  Sharpe=%.2f",
+                bm["n_picks"],
+                bm["gross_win_rate"] * 100,
+                bm["net_win_rate"]   * 100,
+                bm["mean_return_net"] * 100,
+                bm["sharpe"],
+            )
+        else:
+            logger.warning("Model benchmark error: %s", bm["error"])
+    else:
+        logger.info("Model backtest skipped (--skip_model).")
 
     # --- Benchmark 1 -------------------------------------------------------
     logger.info("--- Benchmark 1: Nifty B&H ---")
@@ -342,22 +429,44 @@ def main():
         json.dump(all_results, fh, indent=2, default=str)
     logger.info("P37 benchmark report written -> %s", out_path)
 
-    # --- Console summary ---------------------------------------------------
-    print("\n" + "=" * 60)
-    print("P37 BENCHMARK COMPARISON SUMMARY")
-    print("=" * 60)
-    print(f"  Strategy range   : {start_date} -> {end_date}")
-    print(f"  Forward sessions : {args.fwd}")
+    # --- Console verdict table ---------------------------------------------
+    w = 72
+    print("\n" + "=" * w)
+    print("  P37 BENCHMARK VERDICT")
+    print("=" * w)
+    print(f"  Range: {start_date} -> {end_date}   fwd_sessions={args.fwd}")
     print()
-    print(f"  [1] Nifty B&H       mean={b1['mean_return']*100:.3f}%  WR={b1['win_rate']*100:.1f}%  Sharpe={b1['sharpe']:.2f}")
-    print(f"  [2] 20d Breakout    mean={b2['mean_return']*100:.3f}%  WR={b2['win_rate']*100:.1f}%  Sharpe={b2['sharpe']:.2f}")
-    if not args.skip_mc:
-        b3 = all_results.get("monte_carlo", {})
-        print(f"  [3] MC Random       mean_of_means={b3.get('mean_of_means',0)*100:.3f}%  p5={b3.get('p5_mean',0)*100:.3f}%  p95={b3.get('p95_mean',0)*100:.3f}%")
-    if not args.skip_ablation:
-        print(f"  [4] Feature ablation: see {out_path.name}")
-    print("=" * 60)
-    print(f"\nFull report: {out_path}")
+
+    def _fmt(val, pct=True, decimals=2):
+        if val != val:   # nan
+            return "  N/A   "
+        return f"{val*100:+{5+decimals}.{decimals}f}%" if pct else f"{val:.2f}"
+
+    print(f"  {'Strategy':<22} {'Net WR':>8} {'Mean Net':>9} {'Sharpe':>7}")
+    print(f"  {'-'*22}  {'-'*8}  {'-'*9}  {'-'*7}")
+
+    if bm and "error" not in bm:
+        print(f"  {'Ensemble Model':<22} {_fmt(bm['net_win_rate']):>8} "
+              f"{_fmt(bm['mean_return_net']):>9} {_fmt(bm['sharpe'], pct=False):>7}")
+    else:
+        print(f"  {'Ensemble Model':<22}   (skipped or failed)")
+
+    print(f"  {'Nifty 50 B&H':<22} {_fmt(b1['win_rate']):>8} "
+          f"{_fmt(b1['mean_return']):>9} {_fmt(b1['sharpe'], pct=False):>7}")
+    print(f"  {'20d Breakout':<22} {_fmt(b2['win_rate']):>8} "
+          f"{_fmt(b2['mean_return']):>9} {_fmt(b2['sharpe'], pct=False):>7}")
+
+    if bm and "error" not in bm:
+        print()
+        v_nifty  = _verdict(bm["net_win_rate"], b1["win_rate"])
+        v_break  = _verdict(bm["net_win_rate"], b2["win_rate"])
+        v_sh_n   = _verdict(bm["sharpe"],       b1["sharpe"])
+        v_sh_b   = _verdict(bm["sharpe"],       b2["sharpe"])
+        print(f"  vs Nifty B&H   — Net WR: {v_nifty:<4}  Sharpe: {v_sh_n}")
+        print(f"  vs 20d Breakout — Net WR: {v_break:<4}  Sharpe: {v_sh_b}")
+
+    print("=" * w)
+    print(f"\n  Full JSON report: {out_path}")
 
 
 if __name__ == "__main__":
